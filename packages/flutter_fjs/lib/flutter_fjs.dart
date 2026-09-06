@@ -32,6 +32,17 @@ export 'src/registry/host.dart' show HostRegistry, HostResult;
 export 'src/registry/component.dart' show ComponentRegistry, ComponentBuilder;
 // the node a ComponentBuilder is handed: props, text and children ids. Part
 // of the public surface because writing a builder means reading it.
+export 'src/canvas/canvas_module.dart'
+show
+    canvasDisplayOverride,
+    canvasReadback,
+    canvasNodeDisposed,
+    FjsCanvasDisplayOverride,
+    FjsCanvasReadback,
+    FjsCanvasNodeDisposed;
+export 'src/canvas/canvas_ops.dart'
+show CanvasChunkReader, CanvasOpException;
+export 'src/canvas/images.dart' show FjsCanvasImages;
 export 'src/mirror_tree.dart' show MirrorNode;
 // how the widget layer itself reads a CSS color, for builders that read one
 // off a node: every notation the style engine may send (#hex, rgb()/rgba(),

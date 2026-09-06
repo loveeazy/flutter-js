@@ -145,7 +145,7 @@ onMounted(() => {
 | | 说明 |
 |---|---|
 | 尺寸 | `width` / `height` 是**只读的逻辑像素布局尺寸**，由样式决定；不是位图尺寸。设备像素由宿主处理，**页面不用乘 devicePixelRatio** |
-| `getContext` | 只实现 `'2d'`；`'webgl'` 两端都返回 `null` 并告警一次（web 上也不给，否则浏览器能跑、App 空白）|
+| `getContext` | `'2d'` 内置；`'webgl'` / `'webgl2'` 需安装 [`@ufjs/webgl`](../packages/fjs-webgl) 模块并 import（spec 022）。webgl 坐标是位图像素（页面自己处理 dpr），支持范围见 [canvas-compat.md](canvas-compat.md)；未安装或其余类型返回 `null` 并告警一次 |
 | 读回 | `toDataURL()` 返回 **Promise**；`getImageData` 不支持 |
 | 首次绘制 | 按尺寸画就写在 `@resize` 里（载荷 `{"width":n,"height":n}`）：App 侧 `onMounted` 时 canvas 还没有尺寸 |
 

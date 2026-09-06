@@ -38,23 +38,42 @@ export const FjsCanvasSurface = defineComponent({
     let observer: ResizeObserver | null = null;
     let logicalWidth = 0;
     let logicalHeight = 0;
+    /** Set once the page has asked for a 2d context. Resizing must
+     * re-establish the logical-pixel transform on it — but only then:
+     * requesting '2d' here unconditionally would FIX this canvas as a 2d
+     * canvas (the DOM hands out one context type per element, ever) and a
+     * later `getContext('webgl')` would return null forever. */
+    let created2d = false;
 
     function sync(): void {
       const canvas = el.value;
       if (!canvas) return;
-      const rect = canvas.getBoundingClientRect();
+      // THE BOX OWNS THE SIZE. The page styles <canvas>, and those styles
+      // land on the wrapper box; the bare canvas element's own rect is
+      // polluted by its bitmap's intrinsic aspect ratio — a 2:1 default
+      // bitmap stretches to 2:1 CSS, the measured rect feeds the next
+      // bitmap, and the element stabilizes at the wrong height, overflowing
+      // the box (nothing clips it). Measuring the box and pinning the
+      // element to it is what makes the web surface agree with Flutter,
+      // where the styled box size was always the only size there was.
+      const box = canvas.parentElement ?? canvas;
+      const rect = box.getBoundingClientRect();
       const dpr = globalThis.devicePixelRatio || 1;
       const width = Math.max(0, Math.round(rect.width));
       const height = Math.max(0, Math.round(rect.height));
       if (width === logicalWidth && height === logicalHeight) return;
       logicalWidth = width;
       logicalHeight = height;
+      canvas.style.width = `${width}px`;
+      canvas.style.height = `${height}px`;
       canvas.width = Math.round(width * dpr);
       canvas.height = Math.round(height * dpr);
-      const ctx = canvas.getContext('2d');
-      // the assignment above already cleared the bitmap; re-establish the
-      // logical-pixel coordinate system for whatever draws next
-      if (ctx) ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      if (created2d) {
+        // the assignment above already cleared the bitmap; re-establish the
+        // logical-pixel coordinate system for whatever draws next
+        const ctx = canvas.getContext('2d');
+        if (ctx) ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      }
       // Same event, same payload as the Flutter side. It matters more there
       // — a canvas has no size until the host lays it out — but emitting it
       // here too is what lets one page draw on `@resize` and work on both.
@@ -79,12 +98,26 @@ export const FjsCanvasSurface = defineComponent({
         const canvas = el.value;
         if (!canvas) return null;
         sync();
-        return resolveContext(
+        const context = resolveContext(
           contexts,
           type,
           { canvas: api, domCanvas: canvas },
           attributes,
         );
+        if (type === '2d' && context) {
+          // first 2d context on this canvas: mount-time sync no longer
+          // pre-scaled it (that would have fixed the canvas as 2d forever),
+          // so the logical-pixel transform is established here — once, not
+          // on every call, because a page mid-drawing may have its own
+          // transform in flight
+          if (!created2d) {
+            created2d = true;
+            const dpr = globalThis.devicePixelRatio || 1;
+            const ctx2d = canvas.getContext('2d');
+            ctx2d?.setTransform(dpr, 0, 0, dpr, 0, 0);
+          }
+        }
+        return context;
       },
       toDataURL(type?: string, quality?: number): Promise<string> {
         // a promise, matching the Flutter side's signature: there the pixels

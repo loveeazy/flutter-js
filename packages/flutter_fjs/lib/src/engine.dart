@@ -168,7 +168,8 @@ class FjsEngine extends ChangeNotifier {
   /// RESET_STYLES). 3 = adds CANVAS display lists (op 10); see ui_ops.dart.
   /// 4 = adds the canvas NEEDS_LAYER marker, so a partial clearRect erases
   /// to transparent instead of punching through the page.
-  static const int uiOpsVersion = 4;
+  /// 5 = adds WEBGL command streams (op 11), executed by flutter_angle.
+  static const int uiOpsVersion = 5;
 
   /// Destroys the current VM and clears the mirror tree (hot reload path).
   /// Heap bytes and live objects, WITHOUT collecting.

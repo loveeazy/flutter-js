@@ -58,6 +58,11 @@ static void dump_ops(const uint8_t *ops, int32_t len) {
             case 10: { if (!need(8)) return; uint32_t id = u32(), l = u32();
                       if (!need((int)l)) return;
                       printf("canvas #%u %u bytes\n", id, l); p += l; break; }
+            /* webgl command stream (canvas/webgl/protocol.ts), not decoded
+             * here either — same reasoning as op 10. */
+            case 11: { if (!need(8)) return; uint32_t id = u32(), l = u32();
+                      if (!need((int)l)) return;
+                      printf("webgl #%u %u bytes\n", id, l); p += l; break; }
             default: printf("unknown op %u at %d\n", op, p - 1); return;
         }
     }
@@ -87,7 +92,7 @@ static long count_ops(const uint8_t *ops, int32_t len) {
             case 8: skip = 12; break;
             case 9: skip = 0; break;
             case 1: { if (p + 6 > len) return n; skip = 6 + (ops[p+4] | (ops[p+5] << 8)); break; }
-            case 5: case 6: case 7: case 10: {
+            case 5: case 6: case 7: case 10: case 11: {
                 if (p + 8 > len) return n;
                 uint32_t l = ops[p+4] | (ops[p+5] << 8) | (ops[p+6] << 16) | ((uint32_t)ops[p+7] << 24);
                 skip = 8 + (int)l;

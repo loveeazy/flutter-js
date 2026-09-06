@@ -17,7 +17,11 @@ import { warnCanvasOnce } from './warn';
  * carries three messages, told apart by the payload's `t`. */
 export const CANVAS_EVENT = 30;
 
-type SizeListener = (width: number, height: number) => void;
+type SizeListener = (
+  width: number,
+  height: number,
+  devicePixelRatio?: number,
+) => void;
 
 const sizeListeners = new Map<number, SizeListener>();
 const imageRequests = new Map<number, FjsCanvasImage>();
@@ -60,6 +64,7 @@ function install(): void {
       t?: string;
       w?: number;
       h?: number;
+      dpr?: number;
       err?: string;
       data?: string;
     };
@@ -70,8 +75,13 @@ function install(): void {
     }
     switch (message.t) {
       case 'size':
-        // `id` is the canvas node
-        sizeListeners.get(id)?.(message.w ?? 0, message.h ?? 0);
+        // `id` is the canvas node; dpr is additive and only sent by hosts
+        // that know about webgl (older hosts omit it, which means 1)
+        sizeListeners.get(id)?.(
+          message.w ?? 0,
+          message.h ?? 0,
+          message.dpr,
+        );
         return;
       case 'image': {
         // `id` is the image handle this side allocated

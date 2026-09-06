@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart'
     show ChangeNotifier, Listenable, debugPrint;
 import 'package:flutter/widgets.dart' show GlobalKey;
 
+import 'canvas/canvas_module.dart';
 import 'canvas/display_list.dart';
 import 'ui_ops.dart';
 
@@ -42,6 +43,12 @@ class MirrorNode {
   /// Retained drawing commands, for `canvas` nodes only. Created on the
   /// first CANVAS op so every other node costs nothing.
   FjsCanvasDisplayList? canvas;
+
+  /// Op 11 command chunks (WebGL, executed by the @ufjs/webgl module), for
+  /// `canvas` nodes only. This side keeps them as opaque bytes — the module
+  /// drains and executes them into the node's GL framebuffer; nothing is
+  /// interpreted here. Empty for every node that never touched webgl.
+  final List<Uint8List> webglChunks = <Uint8List>[];
 
   /// Cache slot for the widget layer's per-node view. It lives here so it
   /// dies with the node; nothing in this file interprets it. Flutter skips
@@ -344,6 +351,24 @@ class MirrorTree {
           }
           break;
 
+        case UiOpCode.webgl:
+          check(8);
+          final id = bd.getUint32(p, Endian.little);
+          p += 4;
+          final byteLen = bd.getUint32(p, Endian.little);
+          p += 4;
+          check(byteLen);
+          // copied for the same reason as the canvas bytes: the display
+          // queues them until its GL context exists, outliving this frame
+          final commands = Uint8List.fromList(frame.sublist(p, p + byteLen));
+          p += byteLen;
+          final webglNode = _nodes[id];
+          if (webglNode != null) {
+            webglNode.webglChunks.add(commands);
+            _touch(id);
+          }
+          break;
+
         case UiOpCode.resetStyles:
           // ends an epoch: nodes keep the entries they already resolved, so
           // dropping the directory only means the next use re-sends it
@@ -374,6 +399,7 @@ class MirrorTree {
     _signals.remove(id);
     _globalKeys.remove(id);
     _dirty.remove(id);
+    if (node.webglChunks.isNotEmpty) canvasNodeDisposed?.call(node.id);
     for (final child in List<int>.of(node.children)) {
       _removeDeep(child);
     }
@@ -400,6 +426,9 @@ class MirrorTree {
 
   /// Removes every node and root edge (used on hot reload / reset).
   void clear() {
+    for (final node in _nodes.values) {
+      if (node.webglChunks.isNotEmpty) canvasNodeDisposed?.call(node.id);
+    }
     _nodes.clear();
     _rootChildren.clear();
     _parentOf.clear();

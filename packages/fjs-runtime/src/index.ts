@@ -12,8 +12,19 @@ export type { Element, CanvasElement } from './ui/element';
 // canvas: the page-facing half. The display-list encoder and the surface
 // bookkeeping stay internal — a page reaches them through getContext().
 export { FjsPath2D as Path2D } from './canvas/path2d';
-export { registerContextType } from './canvas/context-registry';
+export { registerContextType, resolveContext, hasContextType } from './canvas/context-registry';
 export { loadCanvasImage, FjsCanvasImage } from './canvas/image';
+// canvas internals a context MODULE (@ufjs/webgl) builds on: the byte
+// buffer the display list uses, the synchronous frame push its sync queries
+// need, and the surface/target shapes its factory receives. WebGL's own
+// implementation lives in @ufjs/webgl (spec 022).
+export { ByteBuf } from './canvas/display-list';
+export { utf8Encode } from './ui/utf8';
+export { flushNow, getWriter } from './host';
+export type { OpWriter } from './ui/ops';
+export type { CanvasSurface } from './canvas/context-2d';
+export type { FjsCanvasOpWriter } from './canvas/surface';
+export type { CanvasContextTarget } from './canvas/context-registry';
 export type {
   FjsCanvasApi,
   FjsCanvasContext2D,

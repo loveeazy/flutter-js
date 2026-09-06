@@ -275,6 +275,15 @@ App 上 Flutter 绘制，Web 上内联 SVG，`demo` 的 `/icons` 页面两端共
 它用到了这里说的大部分东西：API（类型）、widget（`<icon-mind />` 加 Web 替身）、
 autolink（`fjs_iconmind` 进宿主 pubspec 和 main.dart）。
 
+另一个更纯粹的例子是 `packages/fjs-webgl`（`@ufjs/webgl`）：canvas 的
+`getContext('webgl'/'webgl2')` 整个 WebGL 实现（JS 侧 GL 指令流编码 +
+Dart 侧 flutter_angle 执行，spec 021/022）。它演示了**没有组件、没有
+widget、纯上下文扩展**的模块形态——index.ts 在 import 时把两种 context
+类型注册进 runtime 的 context 注册表，Dart 侧通过 flutter_fjs 的 canvas
+接缝（display override / readback / dispose）挂上 Texture 视图与
+`fjs.webgl.*` host 模块。不装它的 app `getContext('webgl')` 两端一致
+返回 null，ANGLE 原生库也完全不进包。
+
 值得抄的是它划边界的方式：**模块不带图标，只知道怎么画**；画哪些由 app 决定，
 但 app 什么都不用配——它的 `prepare` 钩子扫描 app 源码里写了哪些
 `<icon-mind name="…" />`，生成对应的图形数据和类型。使用者的全部流程就是：

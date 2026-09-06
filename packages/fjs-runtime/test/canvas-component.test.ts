@@ -28,10 +28,14 @@ function mount(props: Record<string, unknown> = {}, slot?: () => unknown) {
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(
     ((type: string) => (type === '2d' ? context : null)) as never,
   );
-  vi.spyOn(HTMLCanvasElement.prototype, 'getBoundingClientRect').mockReturnValue({
+  // the surface measures its parent BOX (see sync() in the component); both
+  // the box div and the host div answer with the same rect
+  const rect = {
     x: 0, y: 0, width: 300, height: 150, top: 0, left: 0, right: 300, bottom: 150,
     toJSON: () => ({}),
-  } as DOMRect);
+  } as DOMRect;
+  vi.spyOn(HTMLCanvasElement.prototype, 'getBoundingClientRect').mockReturnValue(rect);
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(rect);
   createApp({
     render: () => h(FjsCanvas, { ref: api as never, ...props }, slot ? { default: slot } : undefined),
   } as Component).mount(host);

@@ -1,0 +1,30 @@
+name: fjs_webgl
+description: "Flutter side of the fjs module webgl: ANGLE-backed getContext('webgl'/'webgl2') for canvas nodes."
+version: 0.1.4
+publish_to: 'none'
+
+environment:
+  sdk: ^3.5.0
+  flutter: ">=3.24.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_fjs: ^0.1.4
+  # 0.1.0 is the newest line compatible with the repo's Flutter 3.24 /
+  # Dart 3.5 toolchain (0.2+ pulls ffi >=2.1.4 which needs Dart >=3.7;
+  # 0.4.x needs Dart ^3.8). API matches 0.3.x for everything we use.
+  # Revisit on the next SDK bump.
+  flutter_angle: 0.1.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+# Only applies when this package is the root (pub ignores it for consumers),
+# which is exactly when it is needed: the generated host gets flutter_fjs by
+# path (see the autolink dependency_overrides), and `flutter test` here must
+# resolve the same checkout to compile.
+dependency_overrides:
+  flutter_fjs:
+    path: ../../flutter_fjs

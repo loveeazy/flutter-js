@@ -12,6 +12,7 @@
 //  op 8 SET_STYLE     u32 id, u32 styleId, u32 activeStyleId
 //  op 9 RESET_STYLES  (no payload)
 //  op 10 CANVAS       u32 id, u32 byteLen, <canvas display list bytes>
+//  op 11 WEBGL        u32 id, u32 byteLen, <webgl command stream bytes>
 //
 // Parent id 0 refers to the implicit root container owned by the host.
 //
@@ -22,6 +23,13 @@
 // truncates it (see canvas/display_list.dart). Hosts declare protocol
 // version 3 to receive it; an older host is told once by the JS side and the
 // commands are dropped there.
+//
+// WebGL (op 11) carries one node's GL command stream, written by
+// canvas/webgl/protocol.ts and decoded by canvas/webgl_replay.dart. Unlike
+// op 10 these are EXECUTED, not retained: each chunk runs into the node's
+// GL framebuffer as it arrives (flutter_angle), then the texture is marked
+// for display. Hosts declare protocol version 5 to receive it; older hosts
+// get the same drop-with-one-warning treatment as op 10.
 //
 // Props (op 6) is a flat JSON object, merged into whatever the node already
 // has; a null value removes the key. See docs/ui-api.md for the property
@@ -57,4 +65,5 @@ abstract final class UiOpCode {
   static const setStyle = 8;
   static const resetStyles = 9;
   static const canvas = 10;
+  static const webgl = 11;
 }

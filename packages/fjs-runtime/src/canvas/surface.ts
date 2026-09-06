@@ -6,6 +6,10 @@
 // the host together, or the host paints one against the other's geometry for
 // a frame. So this registers a pre-flush hook instead of calling uiOps
 // itself.
+//
+// Context types beyond '2d' (WebGL, via @ufjs/webgl) are MODULES: they bring
+// their own command writers and attach them here through attachOpWriter —
+// this file only knows "extra op streams exist", not which one is which.
 import { getWriter, registerPreFlush, scheduleFlush } from '../host';
 import { nodeHandler } from '../ui/element';
 import { resolveContext } from './context-registry';
@@ -21,6 +25,14 @@ import type { CanvasSurface } from './context-2d';
 /** `@resize`'s event number; see EventType in ui/element.ts. */
 const CANVAS_RESIZE_EVENT = 30;
 
+/** What a context module attaches per surface: its own command buffer plus
+ * how its chunks become ops. `write` picks the op (e.g. op 11 for webgl);
+ * the surface never interprets the bytes. */
+export interface FjsCanvasOpWriter {
+  takeChunks(): Uint8Array[];
+  write(nodeId: number, chunk: Uint8Array): void;
+}
+
 /** Canvases with commands waiting for the next frame. */
 const dirty = new Set<FjsCanvasSurface>();
 let drainInstalled = false;
@@ -31,6 +43,14 @@ class FjsCanvasSurface implements CanvasSurface {
   private readonly contexts = new Map<string, unknown>();
   private w = 0;
   private h = 0;
+  /** Device ratio the host renders this canvas's bitmap at. 1 until the
+   * host's size event says otherwise; context modules that own a real
+   * backing store multiply their bitmap size by it (the 2d context ignores
+   * it — logical pixels there). */
+  private dpr = 1;
+  /** Attached context-module writers. Empty for a page that never leaves
+   * the 2d context — the common case pays nothing. */
+  private readonly opWriters: FjsCanvasOpWriter[] = [];
 
   constructor(
     readonly nodeId: number,
@@ -40,9 +60,12 @@ class FjsCanvasSurface implements CanvasSurface {
       dirty.add(this);
       scheduleFlush();
     });
-    listenCanvasSize(nodeId, (width, height) => {
+    listenCanvasSize(nodeId, (width, height, devicePixelRatio) => {
       this.w = width;
       this.h = height;
+      if (typeof devicePixelRatio === 'number' && devicePixelRatio > 0) {
+        this.dpr = devicePixelRatio;
+      }
       // Tell the page. A canvas has no size until the host has laid it out,
       // so a page that draws relative to its box — anything responsive, and
       // every charting library — cannot do its first draw in onMounted the
@@ -62,6 +85,22 @@ class FjsCanvasSurface implements CanvasSurface {
     return this.h;
   }
 
+  devicePixelRatio(): number {
+    return this.dpr;
+  }
+
+  /** Context-module extension point (see FjsCanvasOpWriter). */
+  attachOpWriter(w: FjsCanvasOpWriter): void {
+    this.opWriters.push(w);
+  }
+
+  /** What a module's writer calls when it has new bytes: same dirty set the
+   * 2d writer feeds, one flush per tick. */
+  markDirty(): void {
+    dirty.add(this);
+    scheduleFlush();
+  }
+
   getContext(type: string, attributes?: unknown): unknown {
     return resolveContext(this.contexts, type, {
       canvas: this.element,
@@ -72,6 +111,11 @@ class FjsCanvasSurface implements CanvasSurface {
   flush(): void {
     for (const chunk of this.writer.takeChunks()) {
       getWriter().canvas(this.nodeId, chunk);
+    }
+    for (const w of this.opWriters) {
+      for (const chunk of w.takeChunks()) {
+        w.write(this.nodeId, chunk);
+      }
     }
   }
 

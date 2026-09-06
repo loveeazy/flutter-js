@@ -5,5 +5,6 @@ packages:
   - 'packages/fjs-runtime'
   - 'packages/fjs-iconmind'
   - 'packages/fjs-webview'
+  - 'packages/fjs-webgl'
   - 'demo'
   - 'examples/*'

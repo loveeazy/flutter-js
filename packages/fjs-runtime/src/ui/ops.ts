@@ -19,6 +19,7 @@ export const enum UiOp {
   SetStyle = 8,
   ResetStyles = 9,
   Canvas = 10,
+  Webgl = 11,
 }
 
 /** How many interned styles the peer is asked to remember at once. The style
@@ -30,24 +31,25 @@ export const enum UiOp {
 const STYLE_TABLE_MAX = 2048;
 
 /** Op protocol revision the host's decoder implements; interned styles need
- * 2, canvas display lists need 3, and a canvas that erases part of itself
- * needs 4 (NEEDS_LAYER). The host sets `globalThis.__fjsHost`
- * when it creates the VM. A missing value means an older host that only
- * knows ops 1-6 — a bundle built against this runtime can meet one, since
- * bundles ship separately from the Flutter binary. */
+ * 2, canvas display lists need 3, a canvas that erases part of itself needs
+ * 4 (NEEDS_LAYER), and WebGL command streams need 5. The host sets
+ * `globalThis.__fjsHost` when it creates the VM. A missing value means an
+ * older host that only knows ops 1-6 — a bundle built against this runtime
+ * can meet one, since bundles ship separately from the Flutter binary. */
 export function hostUiOpsVersion(): number {
   const declared = (globalThis as { __fjsHost?: { uiOpsVersion?: number } })
     .__fjsHost?.uiOpsVersion;
   return typeof declared === 'number' ? declared : 1;
 }
 
-let warnedOldHost = false;
-function warnOldHostOnce(): void {
-  if (warnedOldHost) return;
-  warnedOldHost = true;
+let warnedOldHost = new Set<string>();
+function warnOldHostOnce(what = 'canvas'): void {
+  if (warnedOldHost.has(what)) return;
+  warnedOldHost.add(what);
   console.warn(
-    '[fjs] host is too old for <canvas> (op protocol < 3); nothing will be ' +
-      'drawn. Update the flutter_fjs host.',
+    `[fjs] host is too old for ${what === 'canvas' ? '<canvas>' : what} ` +
+      `(op protocol too low); nothing will be drawn. Update the flutter_fjs ` +
+      'host.',
   );
 }
 
@@ -154,6 +156,26 @@ export class OpWriter {
       return this;
     }
     this.u8(UiOp.Canvas);
+    this.u32(id);
+    this.u32(commands.length);
+    this.bytes(commands);
+    return this;
+  }
+
+  /** One canvas node's new WebGL commands for this frame. The bytes are the
+   * command stream canvas/webgl/protocol.ts writes; this layer does not look
+   * inside them (canvas/webgl_replay.dart is the decoder's twin).
+   *
+   * Unlike op 10 these are EXECUTED, not retained: the host runs each chunk
+   * into the node's GL framebuffer as it arrives and marks its texture for
+   * display. Same degradation rule as op 10 — an old host is told once and
+   * the commands are dropped, never silently blank. */
+  webgl(id: number, commands: Uint8Array): this {
+    if (this.uiOpsVersion < 5) {
+      warnOldHostOnce('webgl');
+      return this;
+    }
+    this.u8(UiOp.Webgl);
     this.u32(id);
     this.u32(commands.length);
     this.bytes(commands);

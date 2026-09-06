@@ -32,17 +32,14 @@ function mount(size: { width: number; height: number }) {
   vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(
     ((type: string) => (type === '2d' ? context : null)) as never,
   );
-  vi.spyOn(HTMLCanvasElement.prototype, 'getBoundingClientRect').mockReturnValue({
-    x: 0,
-    y: 0,
-    width: size.width,
-    height: size.height,
-    top: 0,
-    left: 0,
-    right: size.width,
-    bottom: size.height,
+  // the surface measures its parent BOX (see sync() in the component)
+  const boxRect = {
+    x: 0, y: 0, width: size.width, height: size.height,
+    top: 0, left: 0, right: size.width, bottom: size.height,
     toJSON: () => ({}),
-  } as DOMRect);
+  } as DOMRect;
+  vi.spyOn(HTMLCanvasElement.prototype, 'getBoundingClientRect').mockReturnValue(boxRect);
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(boxRect);
   createApp({
     render: () => h(FjsCanvasSurface, { ref: api as never }),
   } as Component).mount(el);
@@ -67,9 +64,16 @@ describe('web canvas', () => {
     // the backing store is device pixels...
     expect([canvas.width, canvas.height]).toEqual([600, 400]);
     // ...while the page sees logical ones, because the context is pre-scaled
+    // when the page first asks for it (mount-time sync must NOT claim the
+    // canvas as 2d — that would lock out webgl for the element's life)
     expect(api.value!.width).toBe(300);
     expect(api.value!.height).toBe(200);
+    expect(calls).toEqual([]);
+    api.value!.getContext('2d');
     expect(calls).toContainEqual(['setTransform', [2, 0, 0, 2, 0, 0]]);
+    // repeated getContext does not clobber a page's own transform
+    api.value!.getContext('2d');
+    expect(calls).toEqual([['setTransform', [2, 0, 0, 2, 0, 0]]]);
   });
 
   it('emits @resize with the same payload the Flutter side sends', async () => {
@@ -81,10 +85,12 @@ describe('web canvas', () => {
     vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(
       ((type: string) => (type === '2d' ? context : null)) as never,
     );
-    vi.spyOn(HTMLCanvasElement.prototype, 'getBoundingClientRect').mockReturnValue({
+    const rect = {
       x: 0, y: 0, width: 320, height: 180, top: 0, left: 0, right: 320, bottom: 180,
       toJSON: () => ({}),
-    } as DOMRect);
+    } as DOMRect;
+    vi.spyOn(HTMLCanvasElement.prototype, 'getBoundingClientRect').mockReturnValue(rect);
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(rect);
     createApp({
       render: () => h(FjsCanvasSurface, { onResize: (payload: string) => seen.push(payload) }),
     } as Component).mount(el);
@@ -103,16 +109,4 @@ describe('web canvas', () => {
     expect(api.value!.getContext('2d')).toBe(first);
   });
 
-  it('returns null for webgl and warns once, as Flutter does', async () => {
-    (globalThis as { devicePixelRatio?: number }).devicePixelRatio = 1;
-    const warnings: string[] = [];
-    vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
-      warnings.push(args.map(String).join(' '));
-    });
-    const { api } = mount({ width: 100, height: 100 });
-    await nextTick();
-    expect(api.value!.getContext('webgl')).toBeNull();
-    expect(api.value!.getContext('webgl')).toBeNull();
-    expect(warnings.filter((w) => w.includes('webgl'))).toHaveLength(1);
-  });
 });

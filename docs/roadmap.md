@@ -285,8 +285,17 @@ Volar 插件（`volar.cjs`）。`form` 之所以从没暴露这个问题，是�
 - ✅ **F2 跑通**：`examples/hello-fjs/src/pages/example/f2.vue`，折线 / 柱状 /
   饼图，适配层在 `examples/hello-fjs/src/f2/adapter.ts`（不用 `@antv/f-vue`）
 
-支持范围与两端差异：[canvas-compat.md](canvas-compat.md)。未做且已登记：WebGL、
-`getImageData` / `putImageData`、`filter`、`OffscreenCanvas`、离屏 canvas。
+- ✅ **WebGL 跑通**（spec 021；spec 022 抽成 [`@ufjs/webgl`](../packages/fjs-webgl) 模块，装才有、不装两端一致 null）：`getContext('webgl')` / `'webgl2'`，同一份 GL
+  代码两端渲染（`examples/hello-fjs/src/pages/example/webgl.vue`）。GL 指令流走
+  op 11，App 侧经 flutter_angle（ANGLE）执行，回放层隔离在
+  `canvas/webgl_replay.dart`；flutter_angle 锁 0.1.0（新版本要 Dart ≥3.7/3.8，
+  工具链升级后跟进）。webgl 坐标是位图像素（页面自己处理 dpr），与 2d 的
+  逻辑像素契约不同，见 canvas-compat。
+
+支持范围与两端差异：[canvas-compat.md](canvas-compat.md)。未做且已登记：
+WebGL 扩展（`getExtension`）、`readPixels`、WebGL2 专属 API（VAO/instancing，
+App 侧）、GL 指令去重、`getImageData` / `putImageData`、`filter`、
+`OffscreenCanvas`、离屏 canvas。
 
 ## 近期计划
 

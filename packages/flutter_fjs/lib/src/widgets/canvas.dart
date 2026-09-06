@@ -1,4 +1,6 @@
-// `canvas` tag -> CustomPaint replaying the node's retained display list.
+// `canvas` tag -> CustomPaint replaying the node's retained display list —
+// unless a context module (@ufjs/webgl) owns the node's display, in which
+// case the module's override view renders instead.
 //
 // Three things this widget owns, none of which JS can do:
 //
@@ -6,19 +8,22 @@
 //     the page needs to know it in logical pixels (`canvas.width`). The size
 //     is only known after layout, so it is reported back through
 //     FjsEvent.canvas — and only when it changes, so a steady page sends
-//     nothing.
-//   * DEVICE PIXELS. There is no backing store to scale here. Flutter
-//     rasterizes the whole scene at the device ratio, so commands drawn in
-//     logical pixels come out sharp for free. That is why a page never
-//     multiplies by devicePixelRatio on this platform (docs/canvas-compat.md).
+//     nothing. The webgl view reports the device ratio alongside, because a
+//     GL page needs it: `gl.viewport` is in device pixels (spec 021 §3.2).
+//   * DEVICE PIXELS. For the 2d path there is no backing store to scale —
+//     Flutter rasterizes the whole scene at the device ratio. Context
+//     modules with a real backing store (webgl's GL framebuffer) get the
+//     ratio reported alongside the size, so the page handles dpr itself,
+//     exactly as it would in a browser.
 //   * CLEARING ON RESIZE. A browser drops the bitmap when the backing store
-//     is resized. Keeping the picture here instead would make the same page
-//     behave differently on the two platforms, so the display list is
-//     dropped to match (constitution I).
+//     is resized; the 2d path drops its display list to match. The webgl
+//     path recreates its texture, which drops the framebuffer the same way
+//     (constitution I).
 import 'dart:convert';
 
 import 'package:flutter/widgets.dart';
 
+import '../canvas/canvas_module.dart';
 import '../canvas/display_list.dart';
 import '../canvas/replay.dart';
 import '../ffi.dart' show FjsEvent;
@@ -41,11 +46,13 @@ class _FjsCanvas extends StatefulWidget {
 
 class _FjsCanvasState extends State<_FjsCanvas> {
   Size _reported = Size.zero;
+  double _reportedDpr = 0;
 
-  void _reportSize(Size size) {
-    if (size == _reported) return;
+  void _reportSize(Size size, double dpr) {
+    if (size == _reported && dpr == _reportedDpr) return;
     final first = _reported == Size.zero;
     _reported = size;
+    _reportedDpr = dpr;
     if (!first) widget.node.canvas?.clear();
     widget.node.canvas?.size = size;
     // after the frame: this runs from layout, and dispatching into JS can
@@ -59,6 +66,7 @@ class _FjsCanvasState extends State<_FjsCanvas> {
           't': 'size',
           'w': _round(size.width),
           'h': _round(size.height),
+          'dpr': dpr,
         }),
       );
     });
@@ -72,7 +80,17 @@ class _FjsCanvasState extends State<_FjsCanvas> {
           constraints.maxWidth.isFinite ? constraints.maxWidth : 0,
           constraints.maxHeight.isFinite ? constraints.maxHeight : 0,
         );
-        _reportSize(size);
+        // the ratio the whole scene is rasterized at; the webgl view needs
+        // it for its backing store, the 2d path ignores it (logical pixels)
+        final dpr = MediaQuery.maybeOf(context)?.devicePixelRatio ?? 1;
+        _reportSize(size, dpr);
+        // a context module that owns this node's display renders it (the
+        // webgl Texture view); null falls through to the 2d CustomPaint
+        final override = canvasDisplayOverride;
+        if (override != null) {
+          final view = override(widget.node, widget.dispatch);
+          if (view != null) return view;
+        }
         final list = widget.node.canvas;
         return CustomPaint(
           size: size,

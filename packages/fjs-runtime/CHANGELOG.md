@@ -1,5 +1,12 @@
 # @ufjs/runtime
 
+## Unreleased
+
+- `@ufjs/runtime/ambient` now declares the static files a build turns into a
+  URL — `import logo from '@/assets/logo.png'` and the other extensions in
+  ASSET_LOADERS. A project's tsconfig says `"types": []`, so nothing else
+  declared them and every app hand-wrote the same `declare module '*.png'`.
+
 ## 0.1.3
 
 - `<canvas>` and a Canvas 2D context. `getContext('2d')` returns a real

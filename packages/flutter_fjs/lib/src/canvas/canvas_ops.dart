@@ -146,6 +146,15 @@ class CanvasChunkReader {
     return v;
   }
 
+  /// Signed 32-bit — the wire shape is the same as [u32] (two's complement),
+  /// this just reinterprets. Used for the fields the JS writer marks i32.
+  int i32() {
+    _need(4);
+    final v = _data.getInt32(_p, Endian.little);
+    _p += 4;
+    return v;
+  }
+
   double f32() {
     _need(4);
     final v = _data.getFloat32(_p, Endian.little);

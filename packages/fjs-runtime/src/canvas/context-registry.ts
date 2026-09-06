@@ -2,15 +2,17 @@
 //
 // `canvas.getContext('2d')` is one member of a family the web keeps
 // extending — 'webgl', 'webgl2', 'webgpu', 'bitmaprenderer'. Only '2d' is
-// implemented here (spec §2), but a context type is exactly the kind of
-// thing that should arrive as a module later: a WebGL context needs a
+// implemented here (spec 019); 'webgl'/'webgl2' arrive as the @ufjs/webgl
+// MODULE (spec 022), which registers them into this registry on import —
+// apps that never import it pay nothing, and a context type is exactly the
+// kind of thing that should arrive as a module: the WebGL context needed a
 // different host widget, a different command protocol and a much larger
-// surface, and none of that should have to touch the `canvas` tag, the
-// element layer or this file's callers.
+// surface, and none of that touched the `canvas` tag, the element layer or
+// this file's callers.
 //
 // So the tag knows about "context types" and nothing else, and an
 // unregistered type is a warn-once + null on BOTH platforms. The web build
-// could hand back a real WebGL context — the browser has one — and that is
+// could hand back real contexts for anything the browser has — and that is
 // precisely why it does not: a page that works in the browser and paints
 // nothing in the app is the failure constitution I exists to prevent.
 import { FjsCanvasRenderingContext2D, type CanvasSurface } from './context-2d';
@@ -53,6 +55,13 @@ export function hasContextType(type: string): boolean {
 /** Resolves a context, caching per (canvas, type) — the DOM returns the same
  * object every time, and a page that calls getContext twice must not end up
  * with two independent state machines. */
+/** Per-canvas context type that already claimed the surface. A DOM canvas
+ * hands out contexts of exactly one kind — after `getContext('webgl')` the
+ * same canvas returns null for `'2d'`, and vice versa. Only a SUCCESSFUL
+ * factory call claims; a warn-once null for an unimplemented type does not
+ * (a page probing `getContext('webgpu')` should not lock its canvas out). */
+const claimed = new WeakMap<Map<string, unknown>, string>();
+
 export function resolveContext(
   cache: Map<string, unknown>,
   type: string,
@@ -61,19 +70,31 @@ export function resolveContext(
 ): unknown {
   const cached = cache.get(type);
   if (cached !== undefined) return cached;
+  const owner = claimed.get(cache);
+  if (owner !== undefined && owner !== type) {
+    warnCanvasOnce(
+      `context:${type}`,
+      `canvas.getContext("${type}") returns null: this canvas already ` +
+        `created a "${owner}" context. A DOM canvas hands out one kind of ` +
+        'context per element, and so do we (on both platforms).',
+    );
+    cache.set(type, null);
+    return null;
+  }
   const factory = factories.get(type);
   if (!factory) {
     warnCanvasOnce(
       `context:${type}`,
-      `canvas.getContext("${type}") is not supported by fjs; only "2d" is ` +
-        'implemented (see docs/canvas-compat.md). Returning null on both ' +
-        'Flutter and web so a page behaves the same on either.',
+      `canvas.getContext("${type}") is not supported by fjs; see ` +
+        'docs/canvas-compat.md. Returning null on both Flutter and web so ' +
+        'a page behaves the same on either.',
     );
     cache.set(type, null);
     return null;
   }
   const context = factory(target, attributes);
   cache.set(type, context);
+  if (context !== null) claimed.set(cache, type);
   return context;
 }
 

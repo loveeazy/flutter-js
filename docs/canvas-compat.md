@@ -70,7 +70,8 @@ onMounted(() => {
 | API | 支持 | 说明 |
 |---|---|---|
 | `getContext('2d')` | ✅ | 同一个 canvas 多次调用返回**同一个对象**（web 语义）|
-| `getContext('webgl')` / `'webgl2'` | ⚠️ | **两端都返回 `null`** 并告警一次。web 上浏览器其实有 WebGL，这里仍然不给：否则页面在浏览器里跑通、到 App 上整块空白（宪法 I）。`getContext` 是一张注册表（[`context-registry.ts`](../packages/fjs-runtime/src/canvas/context-registry.ts)），将来 WebGL 由模块注册进来，`canvas` 标签本身不用改 |
+| `getContext('webgl')` / `'webgl2'` | ⚠️ | **模块提供**（spec 021 实现、022 抽出）：`npm i @ufjs/webgl` 并 `import '@ufjs/webgl'` 才有；不装则两端一致返回 `null` + 一条告警。装后 GL 指令编码进 op 11，App 侧经 [flutter_angle](https://pub.dev/packages/flutter_angle)（ANGLE → Metal/Vulkan）执行，web 侧透传浏览器原生 context。坐标是**位图像素**（逻辑 × dpr，`gl.canvas.width/height`），页面自己处理 dpr——这是与 2d 刻意的差异，见 §11。`getExtension()` 返回 `null`；`readPixels` ❌（整图导出走 `toDataURL`）；一张画布只能有一种 context 类型（DOM 语义，先到先得）。webgl2 专属 API（VAO/instancing 等）web 上原生可用、App 上 warn-once 跳过 |
+| `getContext('webgpu')` 等其它类型 | ⚠️ | 两端都返回 `null` 并告警一次。`getContext` 是一张注册表（[`context-registry.ts`](../packages/fjs-runtime/src/canvas/context-registry.ts)），新类型由模块注册进来，`canvas` 标签本身不用改 |
 | `canvas.width` / `height` | ⚠️ | **只读的逻辑像素布局尺寸**，不是位图尺寸，也不能赋值。宿主负责设备像素（Flutter 整场景按 dpr 光栅化，web 侧组件按 dpr 设 backing store 并预置 `setTransform`），**页面永远不用自己乘 devicePixelRatio** |
 | `canvas.toDataURL(type?, quality?)` | ⚠️ | 返回 **Promise**（DOM 是同步的）：App 侧要等宿主画完一帧再读回来。只支持 `image/png` |
 | `canvas.style` / `getBoundingClientRect` / `appendChild` | ❌ | canvas 不是 DOM 元素。尺寸用 CSS 类写在标签上 |

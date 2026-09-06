@@ -10,7 +10,8 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { FjsCanvasRenderingContext2D, type CanvasSurface } from '../src/canvas/context-2d';
 import { Cmd, CanvasWriter, PathCmd } from '../src/canvas/display-list';
 import { parseFont } from '../src/canvas/font';
-import { resolveCanvasContextForTest } from './helpers/canvas';
+import { registerContextType, resolveContext } from '../src/canvas/context-registry';
+import { testSurface, resolveCanvasContextForTest } from './helpers/canvas';
 
 interface Decoded {
   cmd: number;
@@ -407,11 +408,41 @@ describe('getContext registry', () => {
     expect(second).toBe(first);
   });
 
-  it('returns null for webgl and warns exactly once', () => {
+  it('webgl is null until the @ufjs/webgl module registers it', () => {
+    // core ships the registry, the module ships the implementation: an app
+    // without the import gets null + exactly one warning on BOTH platforms
     const { first, second, warnings } = resolveCanvasContextForTest.twice('webgl');
     expect(first).toBeNull();
     expect(second).toBeNull();
     expect(warnings).toHaveLength(1);
+  });
+
+  it('a module-registered type claims the canvas, like the DOM', () => {
+    registerContextType('test-gl', () => ({ marker: 'test-gl' }));
+    const cache = new Map<string, unknown>();
+    const warnings: string[] = [];
+    const original = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(' '));
+    };
+    try {
+      const target = { canvas: {}, surface: testSurface() };
+      expect(resolveContext(cache, 'test-gl', target)).toEqual({ marker: 'test-gl' });
+      expect(resolveContext(cache, '2d', target)).toBeNull();
+      expect(warnings.filter((w) => w.includes('"2d"'))).toHaveLength(1);
+    } finally {
+      console.warn = original;
+    }
+  });
+
+  it('a probing null does not claim the canvas', () => {
+    const cache = new Map<string, unknown>();
+    const target = { canvas: {}, surface: testSurface() };
+    // unimplemented type: warn + null, but the canvas stays available
+    expect(resolveContext(cache, 'webgpu', target)).toBeNull();
+    expect(resolveContext(cache, '2d', target)).toBeInstanceOf(
+      FjsCanvasRenderingContext2D,
+    );
   });
 });
 

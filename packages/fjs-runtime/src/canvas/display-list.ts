@@ -120,18 +120,20 @@ export class ByteBuf {
     this.buf = next;
   }
 
-  u8(v: number): void {
+  u8(v: number): this {
     this.ensure(1);
     this.buf[this.len++] = v & 0xff;
+    return this;
   }
 
-  u16(v: number): void {
+  u16(v: number): this {
     this.ensure(2);
     this.buf[this.len++] = v & 0xff;
     this.buf[this.len++] = (v >>> 8) & 0xff;
+    return this;
   }
 
-  u32(v: number): void {
+  u32(v: number): this {
     this.ensure(4);
     const b = this.buf;
     let p = this.len;
@@ -140,9 +142,16 @@ export class ByteBuf {
     b[p++] = (v >>> 16) & 0xff;
     b[p++] = (v >>> 24) & 0xff;
     this.len = p;
+    return this;
   }
 
-  f32(v: number): void {
+  /** Signed 32-bit, little-endian. Same wire shape as u32 (two's complement);
+   * the decoder reads with getUint32 and reinterprets. */
+  i32(v: number): this {
+    return this.u32(v | 0);
+  }
+
+  f32(v: number): this {
     this.ensure(4);
     f32View[0] = v;
     const b = this.buf;
@@ -150,12 +159,14 @@ export class ByteBuf {
     b[this.len++] = f32Bytes[1];
     b[this.len++] = f32Bytes[2];
     b[this.len++] = f32Bytes[3];
+    return this;
   }
 
-  bytes(src: Uint8Array): void {
+  bytes(src: Uint8Array): this {
     this.ensure(src.length);
     this.buf.set(src, this.len);
     this.len += src.length;
+    return this;
   }
 
   /** The bytes so far, leaving them in place. */

@@ -17,6 +17,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/painting.dart';
 
+import 'canvas_module.dart';
 import '../mirror_tree.dart';
 import '../registry/host.dart';
 import '../widgets/image.dart' show fjsResolveImageSource;
@@ -175,6 +176,14 @@ Future<void> _toDataUrl({
   }
 
   final list = node?.canvas;
+  final readback = canvasReadback;
+  if (readback != null && node != null && node.webglChunks.isNotEmpty) {
+    // a context module (@ufjs/webgl) owns this canvas: the picture is its
+    // GL framebuffer, not the (empty) display list — hand the whole export
+    // over, same event, same payload
+    unawaited(readback(requestId, node.id, report));
+    return;
+  }
   if (list == null || list.size.isEmpty) {
     report({'err': 'canvas has nothing to export'});
     return;

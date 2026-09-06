@@ -4,13 +4,28 @@ import { resolveContext } from '../../src/canvas/context-registry';
 import { CanvasWriter } from '../../src/canvas/display-list';
 import { resetCanvasWarnings } from '../../src/canvas/warn';
 import type { CanvasSurface } from '../../src/canvas/context-2d';
+import type { FjsCanvasOpWriter } from '../../src/canvas/surface';
 
-export function testSurface(width = 300, height = 200): CanvasSurface {
+/** The test stands in for the real FjsCanvasSurface: same members a context
+ * module sees (attachOpWriter / markDirty live on the class, not the 2d
+ * interface), so op-extension tests can drive them directly. */
+export function testSurface(
+  width = 300,
+  height = 200,
+): CanvasSurface & {
+  attachOpWriter(w: FjsCanvasOpWriter): void;
+  markDirty(): void;
+} {
+  const opWriters: FjsCanvasOpWriter[] = [];
+  const dirty: Array<() => void> = [];
   return {
     nodeId: 1,
     writer: new CanvasWriter(() => {}),
+    attachOpWriter: (w) => opWriters.push(w),
+    markDirty: () => dirty.push(() => {}),
     width: () => width,
     height: () => height,
+    devicePixelRatio: () => 2,
   };
 }
 

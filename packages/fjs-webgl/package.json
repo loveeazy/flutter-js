@@ -1,0 +1,47 @@
+{
+  "name": "@ufjs/webgl",
+  "version": "0.1.4",
+  "description": "WebGL contexts for fjs canvas — getContext('webgl'/'webgl2') on the app via ANGLE, browser-native on the web",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/snice/flutter-js.git",
+    "directory": "packages/fjs-webgl"
+  },
+  "type": "module",
+  "types": "./index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.ts",
+    "src",
+    "flutter",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@ufjs/runtime": ">=0.1.4"
+  },
+  "devDependencies": {
+    "@ufjs/runtime": "workspace:*",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
+  },
+  "fjs": {
+    "module": true,
+    "flutter": {
+      "package": "fjs_webgl",
+      "path": "./flutter",
+      "import": "package:fjs_webgl/fjs_webgl.dart",
+      "register": "FjsWebgl.register(engine)"
+    }
+  }
+}
