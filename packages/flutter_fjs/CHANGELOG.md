@@ -1,3 +1,15 @@
+## 0.1.4
+
+- **最低 Flutter 版本提到 3.38.0（Dart 3.10）。** 更低的版本编译不过：WebGL 模块
+  依赖的 flutter_angle 0.4.x 用私有 `@Native` 函数接 TypedData `.address`，
+  Dart 3.10 之前的 CFE 会崩在 `Crash when compiling: Null check operator used
+  on a null value`。Flutter 3.35（Dart 3.9）同样受影响，升级要一步到 3.38+。
+- `flutter_angle` 依赖从核心移到 `@ufjs/webgl` 模块（spec 022）。不用
+  `getContext('webgl')` 的应用不再拉 ANGLE。
+- `ffi` 提到 `^2.2.0`；`cached_network_image` 放宽成 `>=3.4.1 <5.0.0`，这样在
+  Flutter ≥3.44 上会自动用 4.x，而不必在这里锁死一个更高的 SDK 下限。
+- Android 侧固定 `ndkVersion`，避免宿主和插件解析到不同的 NDK。
+
 ## 0.1.3
 
 - `<canvas>`: a Canvas 2D host. JS sends a display list of drawing commands and

@@ -15,22 +15,22 @@ topics:
   - vue
 
 environment:
-  sdk: ">=3.3.0 <4.0.0"
-  flutter: ">=3.24.0"
+  # Flutter 3.38 (Dart 3.10) is the floor for the whole repo: below it the
+  # CFE crashes compiling a private `@Native` function that takes a
+  # TypedData `.address` (fixed in Dart 3.10), which is what flutter_angle
+  # 0.4.x does. The generated host's Gradle/AGP/KGP baseline assumes it too.
+  sdk: ">=3.10.0 <4.0.0"
+  flutter: ">=3.38.0"
 
 dependencies:
   flutter:
     sdk: flutter
-  cached_network_image: ^3.4.1
-  ffi: ^2.1.0
-  # ANGLE-backed GL context for canvas.getContext('webgl') (spec 021):
-  # one Dart API across Android/iOS/macOS, no per-platform native code.
-  # Isolated to canvas/webgl_replay.dart — swap surface if it stalls.
-  # 0.1.0 is the newest line compatible with the repo's Flutter 3.24 /
-  # Dart 3.5 toolchain (0.2+ pulls ffi >=2.1.4 which needs Dart >=3.7;
-  # 0.4.x needs Dart ^3.8). API matches 0.3.x for everything we use.
-  # Revisit on the next SDK bump.
-  flutter_angle: 0.1.0
+  # 4.x needs Flutter >=3.44 — left open so it is picked up on a newer
+  # toolchain without forcing one here
+  cached_network_image: ">=3.4.1 <5.0.0"
+  ffi: ^2.2.0
+  # NOTE: WebGL lives in the fjs-webgl module (spec 022), which owns the
+  # flutter_angle dependency. The core has no GL dependency of its own.
   # Matrix4, for the CSS `transform` parser (style_parse.dart stays
   # widget-free, so it cannot get it from flutter/widgets.dart)
   vector_math: ^2.1.4

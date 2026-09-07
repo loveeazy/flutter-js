@@ -4,18 +4,20 @@ version: 0.1.4
 publish_to: 'none'
 
 environment:
-  sdk: ^3.5.0
-  flutter: ">=3.24.0"
+  # flutter_angle 0.4.x asks for Dart ^3.8.1, but the real floor is 3.10:
+  # its GL bindings call private `@Native` functions with a TypedData
+  # `.address`, and the CFE crashes on that until Dart 3.10 / Flutter 3.38.
+  sdk: ">=3.10.0 <4.0.0"
+  flutter: ">=3.38.0"
 
 dependencies:
   flutter:
     sdk: flutter
   flutter_fjs: ^0.1.4
-  # 0.1.0 is the newest line compatible with the repo's Flutter 3.24 /
-  # Dart 3.5 toolchain (0.2+ pulls ffi >=2.1.4 which needs Dart >=3.7;
-  # 0.4.x needs Dart ^3.8). API matches 0.3.x for everything we use.
-  # Revisit on the next SDK bump.
-  flutter_angle: 0.1.0
+  # 0.4.x drops the NativeArray wrapper (plain TypedData goes straight to
+  # GL), adds Linux/web/wasm and iOS-simulator surfaces, and carries a much
+  # newer ANGLE. Isolated to src/replay.dart — swap surface if it stalls.
+  flutter_angle: ^0.4.2
 
 dev_dependencies:
   flutter_test:

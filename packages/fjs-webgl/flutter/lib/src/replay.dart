@@ -886,36 +886,29 @@ class FjsAngleBindings extends FjsGlBindings {
   // -- data upload
   @override
   void bufferData(int target, Uint8List data, int usage) {
-    // flutter_angle 0.1.0's bufferData reads `.data` — its own NativeArray,
-    // not a TypedData (that threw NoSuchMethodError on device)
-    final native = _native(data);
-    gl.bufferData(target, native, usage);
-    native.dispose();
+    // flutter_angle 0.4+ takes TypedData straight through to GL (0.1.x
+    // wanted its own NativeArray wrapper); the bytes are copied natively.
+    gl.bufferData(target, data, usage);
   }
 
   @override
   void bufferDataSize(int target, int size, int usage) {
-    // the plugin's int path hands the SIZE to GL as a pointer address,
-    // which glBufferData would happily read — upload zeroed bytes instead
-    final native = Uint8Array(size);
-    gl.bufferData(target, native, usage);
-    native.dispose();
+    // the plugin's int path still hands the SIZE to GL as a pointer address
+    // (bufferDataVoid), which glBufferData would happily read — upload
+    // zeroed bytes instead
+    gl.bufferData(target, Uint8List(size), usage);
   }
 
   @override
   void bufferSubData(int target, int offset, Uint8List data) {
-    final native = _native(data);
-    gl.bufferSubData(target, offset, native);
-    native.dispose();
+    gl.bufferSubData(target, offset, data);
   }
 
   @override
   void texImage2D(int target, int level, int internalformat, int width,
       int height, int border, int format, int type, Uint8List pixels) {
-    final native = _native(pixels);
     gl.texImage2D(target, level, internalformat, width, height, border,
-        format, type, native);
-    native.dispose();
+        format, type, pixels);
   }
 
   @override
@@ -930,19 +923,15 @@ class FjsAngleBindings extends FjsGlBindings {
           'yet; skipped.');
       return;
     }
-    final native = _native(cached.bytes);
     gl.texImage2D(target, level, internalformat, cached.width, cached.height,
-        0, format, type, native);
-    native.dispose();
+        0, format, type, cached.bytes);
   }
 
   @override
   void texSubImage2D(int target, int level, int xoffset, int yoffset,
       int width, int height, int format, int type, Uint8List pixels) {
-    final native = _native(pixels);
     gl.texSubImage2D(
-        target, level, xoffset, yoffset, width, height, format, type, native);
-    native.dispose();
+        target, level, xoffset, yoffset, width, height, format, type, pixels);
   }
 
   @override
@@ -1171,27 +1160,24 @@ class FjsAngleBindings extends FjsGlBindings {
 
   @override
   Uint8List? readPixelsRgba(int x, int y, int width, int height) {
+    // The destination MUST be native memory registered with flutter_angle's
+    // zero-copy registry: on Android+ANGLE the plugin routes an unregistered
+    // TypedData through a pooled COPY, so glReadPixels would fill the copy
+    // and the Dart list would come back all zeroes.
+    final scratch = ZeroCopyBuffer.createUint32(width * height);
     try {
-      final native = Uint8Array(width * height * 4);
+      final view = scratch.buffer.asUint8List(
+          scratch.offsetInBytes, width * height * 4);
       gl.readPixels(
-          x, y, width, height, WebGL.RGBA, WebGL.UNSIGNED_BYTE, native);
-      final out = Uint8List.fromList(native.toDartList());
-      native.dispose();
-      return out;
+          x, y, width, height, WebGL.RGBA, WebGL.UNSIGNED_BYTE, view);
+      return Uint8List.fromList(view);
     } catch (_) {
       return null;
+    } finally {
+      ZeroCopyBuffer.free(scratch);
     }
   }
 
-  /// flutter_angle 0.1.x takes its own native-memory wrapper for pixel
-  /// arrays (texImage2D / texSubImage2D / bufferSubData / readPixels), not a
-  /// TypedData. Copies once into ANGLE-accessible memory, freed by the
-  /// caller after the GL call.
-  Uint8Array _native(Uint8List bytes) {
-    final native = Uint8Array(bytes.length);
-    native.set(bytes);
-    return native;
-  }
 }
 
 class _LocationQuery {
@@ -1294,6 +1280,11 @@ class FjsWebglRuntime {
         useSurfaceProducer: true,
       );
       final texture = await angle.createTexture(options);
+      // One FlutterAngle serves every canvas node, and 0.4.x binds a
+      // texture's FBO / EGL surface only in activate() — without this the
+      // stream would render into whichever texture was last touched (or,
+      // for the very first one, into no framebuffer at all).
+      texture.activate();
       state.texture = texture;
       state.bindings =
           FjsAngleBindings(texture.getContext(), state.locationRecords);
@@ -1316,6 +1307,9 @@ class FjsWebglRuntime {
     if (node.webglChunks.isEmpty) return;
     final chunks = List<Uint8List>.of(node.webglChunks);
     node.webglChunks.clear();
+    // Re-bind this node's target: another node's drain in the same frame
+    // leaves ITS framebuffer / EGL surface current (see _create).
+    state.texture?.activate();
     try {
       for (final chunk in chunks) {
         state.decoder!.run(chunk);

@@ -129,7 +129,10 @@ void main() {
     CanvasReplay(canvas, const Size(300, 200)).run([chunk.take()]);
 
     expect(canvas.calls, ['drawRect(10.0,20.0,30.0,40.0)']);
-    expect(canvas.paints.single.color, const Color(0xFF07C160));
+    // toARGB32(): since Flutter 3.27 Color holds float components, and a
+    // Paint's colour comes back through that conversion — comparing Color
+    // objects fails on the float round-trip even when the ARGB is identical.
+    expect(canvas.paints.single.color.toARGB32(), 0xFF07C160);
     expect(canvas.paints.single.style, PaintingStyle.fill);
   });
 

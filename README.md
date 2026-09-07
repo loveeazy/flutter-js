@@ -73,6 +73,10 @@ npm run dev:pages
 带了预编译的 `.so` 和 `.xcframework`；字节码编译器 `fjsc` 作为
 `@ufjs/cli` 的可选依赖按平台自动装。
 
+真机/模拟器运行需要 **Flutter ≥ 3.38.0（Dart 3.10）**，纯 Web 构建不需要
+Flutter。3.35 及以下编译不过，原因见
+[toolchain.md](docs/toolchain.md#准备环境)。
+
 默认模板是 `vue3-vite`。它会生成标准 Vite 入口和必须的 `src/pages` 目录：
 
 ```text

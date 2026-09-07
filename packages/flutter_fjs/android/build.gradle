@@ -28,6 +28,7 @@ apply plugin: 'com.android.library'
 android {
     namespace 'dev.flutterjs.flutter_fjs'
     compileSdkVersion 34
+    ndkVersion = "28.2.13676358"
 
     defaultConfig {
         minSdkVersion 21

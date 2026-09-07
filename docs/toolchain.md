@@ -17,6 +17,13 @@ npm run build:release
 
 ## 准备环境
 
+**最低 Flutter 版本：3.38.0（Dart 3.10）**，纯 Web 构建不需要 Flutter。更低的
+版本编译不过：`@ufjs/webgl` 用的 flutter_angle 0.4.x 会让 Dart 3.10 之前的 CFE
+崩在 `Crash when compiling: Null check operator used on a null value`——一个私有
+`@Native` 函数收 TypedData `.address`，编译器给克隆出来的目标起了个下划线开头的
+名字，而私有名要求带 library。**Flutter 3.35（Dart 3.9）也在这条线里**，别只升
+到 3.35。
+
 分两种情况，除了依赖来源不同，之后所有 `fjs` 子命令完全一样。
 
 ### A. 用发布包做应用
@@ -494,7 +501,7 @@ fjs run android --release --gz
 
 1. 确认 `.fjs/flutter` 存在，不存在就执行 `flutter create`
 2. 写入生成版 `pubspec.yaml` 和 `lib/main.dart`
-3. 执行 `flutter pub get`
+3. 把 Android 工具链补到基线（见下），执行 `flutter pub get`
 4. 启动 `fjs dev --pages`
 5. 执行 `flutter run -d android|ios --dart-define=FJS_DEV=<host:port>`
 
@@ -511,6 +518,24 @@ fjs run android --profile
 fjs run android --release --gz
 fjs run android -- --dart-define=FOO=bar
 ```
+
+**生成宿主的 Android 工具链**：宿主是 `flutter create` 一次性生成的，之后不会
+自己跟着 Flutter 升级，所以每次 `fjs run` 都会把它补到基线上——只升不降，宿主上
+已有的更高版本不会被拽回来：
+
+| | 基线 |
+|---|---|
+| Gradle | 8.14 |
+| Android Gradle Plugin | 8.11.1 |
+| Kotlin Gradle Plugin | 2.2.20 |
+| Java / jvmTarget | 17 |
+
+同一步还会往宿主的 `android {}` 里写一段按 `--target-platform` 裁剪 ABI 的配置
+（`packaging.jniLibs.excludes`），否则插件 AAR 带进来的 `.so`（`libfjs.so`、
+`libdartjni.so`）会三个 ABI 全打进 APK。注意这里不能用
+`defaultConfig.ndk.abiFilters`：它只管本模块自己编出来的 native 产物，管不到
+依赖带来的预编译 `.so`。Groovy 和 Kotlin DSL 两种宿主都支持（`flutter create`
+从 3.38 起生成 `.kts`）。
 
 **Android 运行注意事项**：Flutter 和直接 gradle 使用的 JDK 可能不同。Android
 release 构建建议显式指定 JDK 17：

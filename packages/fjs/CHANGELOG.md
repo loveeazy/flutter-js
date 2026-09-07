@@ -1,5 +1,19 @@
 # @ufjs/cli
 
+## Unreleased
+
+- 生成的 Flutter 宿主每次 `fjs run` 都会补到一条 Android 工具链基线上
+  （Gradle 8.14 / AGP 8.11.1 / KGP 2.2.20 / Java 17），只升不降。宿主是
+  `flutter create` 一次性生成的，不会自己跟着 Flutter 升级，之前会一路警告到
+  Flutter 不再支持为止。
+- `--target-platform` 的 ABI 裁剪修好了：原来写的是
+  `defaultConfig.ndk.abiFilters`，它只管本模块编出来的 native 产物，管不到插件
+  AAR 带进来的预编译 `.so`——`libfjs.so`、`libdartjni.so` 一直是三个 ABI 全打进
+  APK。改用 `packaging.jniLibs.excludes`。
+- 上面两段补丁同时支持 Groovy 和 Kotlin DSL 的宿主。`flutter create` 从 3.38 起
+  生成 `.kts`，而补丁只认 `build.gradle`，在新机器上会静默跳过。已有宿主里的旧
+  写法会被自动迁移。
+
 ## 0.1.3
 
 - Local image assets. `public/` is served by `fjs dev` and copied into the
