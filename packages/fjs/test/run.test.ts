@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  patchAndroidAbiFilters,
+  patchAndroidToolchain,
   selectDevServerPort,
   syncNativeHostConfig,
   type DevPortProbe,
@@ -134,6 +136,183 @@ describe('syncNativeHostConfig', () => {
       const plist = fs.readFileSync(path.join(dir, 'ios/Runner/Info.plist'), 'utf8');
       expect(plist.match(/fjs: configured values/g)).toHaveLength(1);
       expect(plist).toContain('scan &amp; &quot;connect&quot;');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('patchAndroidToolchain', () => {
+  function host(files: Record<string, string>): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fjs-host-'));
+    for (const [rel, body] of Object.entries(files)) {
+      const file = path.join(dir, rel);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, body);
+    }
+    return dir;
+  }
+
+  const groovySettings = [
+    'plugins {',
+    '    id "dev.flutter.flutter-plugin-loader" version "1.0.0"',
+    '    id "com.android.application" version "8.3.0" apply false',
+    '    id "org.jetbrains.kotlin.android" version "1.8.22" apply false',
+    '}',
+    '',
+  ].join('\n');
+
+  it('lifts a Groovy host past the versions Flutter warns about', () => {
+    const dir = host({
+      'android/gradle/wrapper/gradle-wrapper.properties':
+        'distributionUrl=https\\://services.gradle.org/distributions/gradle-8.4-all.zip\n',
+      'android/settings.gradle': groovySettings,
+      'android/app/build.gradle':
+        'android {\n    compileOptions {\n        sourceCompatibility = JavaVersion.VERSION_1_8\n    }\n}\n',
+    });
+    try {
+      patchAndroidToolchain(dir);
+      expect(fs.readFileSync(path.join(dir, 'android/gradle/wrapper/gradle-wrapper.properties'), 'utf8'))
+        .toContain('gradle-8.14-all.zip');
+      const settings = fs.readFileSync(path.join(dir, 'android/settings.gradle'), 'utf8');
+      expect(settings).toContain('id "com.android.application" version "8.11.1"');
+      expect(settings).toContain('id "org.jetbrains.kotlin.android" version "2.2.20"');
+      // the loader is versioned independently — leave it alone
+      expect(settings).toContain('flutter-plugin-loader" version "1.0.0"');
+      expect(fs.readFileSync(path.join(dir, 'android/app/build.gradle'), 'utf8'))
+        .toContain('JavaVersion.VERSION_17');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('handles the Kotlin DSL template and leaves newer versions alone', () => {
+    const dir = host({
+      'android/gradle/wrapper/gradle-wrapper.properties':
+        'distributionUrl=https\\://services.gradle.org/distributions/gradle-8.20-all.zip\n',
+      'android/settings.gradle.kts': [
+        'plugins {',
+        '    id("com.android.application") version "8.11.1" apply false',
+        '    id("org.jetbrains.kotlin.android") version "2.0.0" apply false',
+        '}',
+        '',
+      ].join('\n'),
+      'android/app/build.gradle.kts': 'android {\n}\n',
+    });
+    try {
+      patchAndroidToolchain(dir);
+      expect(fs.readFileSync(path.join(dir, 'android/gradle/wrapper/gradle-wrapper.properties'), 'utf8'))
+        .toContain('gradle-8.20-all.zip');
+      const settings = fs.readFileSync(path.join(dir, 'android/settings.gradle.kts'), 'utf8');
+      expect(settings).toContain('id("com.android.application") version "8.11.1"');
+      expect(settings).toContain('id("org.jetbrains.kotlin.android") version "2.2.20"');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('is idempotent', () => {
+    const dir = host({ 'android/settings.gradle': groovySettings });
+    try {
+      patchAndroidToolchain(dir);
+      const once = fs.readFileSync(path.join(dir, 'android/settings.gradle'), 'utf8');
+      patchAndroidToolchain(dir);
+      expect(fs.readFileSync(path.join(dir, 'android/settings.gradle'), 'utf8')).toBe(once);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('patchAndroidAbiFilters', () => {
+  function host(rel: string, body: string): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fjs-abi-'));
+    const file = path.join(dir, rel);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, body);
+    return dir;
+  }
+
+  const app = [
+    'android {',
+    '    namespace = "com.example.demo"',
+    '',
+    '    defaultConfig {',
+    '        applicationId = "com.example.demo"',
+    '    }',
+    '}',
+    '',
+  ].join('\n');
+
+  it('injects Groovy into a Groovy host', () => {
+    const dir = host('android/app/build.gradle', app);
+    try {
+      patchAndroidAbiFilters(dir);
+      const out = fs.readFileSync(path.join(dir, 'android/app/build.gradle'), 'utf8');
+      expect(out).toContain('def fjsAbis = [');
+      expect(out).toContain('excludes += fjsAbis.values()');
+      expect(out).not.toContain('mapOf(');
+      // the pruning belongs to android {}, not defaultConfig {}
+      expect(out.indexOf('fjsAbis')).toBeGreaterThan(out.indexOf('android {'));
+      expect(out.indexOf('fjsAbis')).toBeLessThan(out.indexOf('defaultConfig {'));
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('injects Kotlin DSL into a build.gradle.kts host', () => {
+    const dir = host('android/app/build.gradle.kts', app);
+    try {
+      patchAndroidAbiFilters(dir);
+      const out = fs.readFileSync(path.join(dir, 'android/app/build.gradle.kts'), 'utf8');
+      expect(out).toContain('val fjsAbis = mapOf(');
+      expect(out).toContain('(project.property("target-platform") as String)');
+      expect(out).not.toContain('def fjsAbis');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('migrates a host carrying the old abiFilters snippet', () => {
+    const legacy = [
+      'android {',
+      '    defaultConfig {',
+      '        // fjs: honour --target-platform for plugin jniLibs',
+      '        if (project.hasProperty("target-platform")) {',
+      '            def fjsSelected = ["arm64-v8a"]',
+      '            if (!fjsSelected.isEmpty()) {',
+      '                ndk {',
+      '                    abiFilters.clear()',
+      '                    abiFilters.addAll(fjsSelected)',
+      '                }',
+      '            }',
+      '        }',
+      '',
+      '        applicationId = "com.example.demo"',
+      '    }',
+      '}',
+      '',
+    ].join('\n');
+    const dir = host('android/app/build.gradle', legacy);
+    try {
+      patchAndroidAbiFilters(dir);
+      const out = fs.readFileSync(path.join(dir, 'android/app/build.gradle'), 'utf8');
+      expect(out).not.toContain('abiFilters');
+      expect(out).toContain('excludes += fjsAbis.values()');
+      expect(out.match(/fjs: honour --target-platform/g)).toHaveLength(1);
+      expect(out).toContain('applicationId = "com.example.demo"');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('is idempotent', () => {
+    const dir = host('android/app/build.gradle.kts', app);
+    try {
+      patchAndroidAbiFilters(dir);
+      const once = fs.readFileSync(path.join(dir, 'android/app/build.gradle.kts'), 'utf8');
+      patchAndroidAbiFilters(dir);
+      expect(fs.readFileSync(path.join(dir, 'android/app/build.gradle.kts'), 'utf8')).toBe(once);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

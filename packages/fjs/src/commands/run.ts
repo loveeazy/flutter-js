@@ -179,7 +179,8 @@ export function ensureFlutterHost(dir: string, name: string, managed = true): vo
     const appConfig = readAppConfig(process.cwd());
     writeHostPubspec(pubspec, name, autolink);
     writeHostMain(path.join(dir, 'lib', 'main.dart'), name, autolink);
-    patchAndroidAbiFilters(path.join(dir, 'android', 'app', 'build.gradle'));
+    patchAndroidAbiFilters(dir);
+    patchAndroidToolchain(dir);
     syncNativeHostConfig(dir, appConfig);
     removeDefaultWidgetTest(dir);
   }
@@ -246,37 +247,180 @@ export function publicAssetDirs(dir: string): string[] {
 
 const ABI_FILTER_MARKER = '// fjs: honour --target-platform for plugin jniLibs';
 
-// `flutter build apk --target-platform android-arm64` only selects which Flutter
-// engine/app libraries are packaged; jniLibs coming from plugin AARs (libfjs.so)
-// are still packaged for every ABI. Flutter passes the same value to Gradle as
-// `-Ptarget-platform`, so mirror it into `ndk.abiFilters` in the host project.
-function patchAndroidAbiFilters(file: string): void {
-  if (!fs.existsSync(file)) return;
+/** Flutter drops support for old Android toolchains faster than a host
+ * generated once by `flutter create` gets regenerated, so a host scaffolded
+ * a few Flutter releases ago starts warning (and eventually failing) on
+ * Gradle/AGP/KGP versions it was born with. These are the versions the
+ * current stable template ships; the patch only ever moves versions up. */
+const ANDROID_TOOLCHAIN = {
+  gradle: '8.14',
+  agp: '8.11.1',
+  kotlin: '2.2.20',
+};
+
+/** Lift an already-scaffolded host's Android toolchain to ANDROID_TOOLCHAIN.
+ * Idempotent, and a no-op on a host that is already newer — a user who
+ * bumped past us does not get dragged back down. */
+export function patchAndroidToolchain(dir: string): void {
+  const android = path.join(dir, 'android');
+
+  const wrapper = path.join(android, 'gradle', 'wrapper', 'gradle-wrapper.properties');
+  patchFile(wrapper, (source) =>
+    source.replace(
+      /(distributionUrl=.*?gradle-)(\d+(?:\.\d+)*)(-(?:all|bin)\.zip)/,
+      (whole, head: string, version: string, tail: string) =>
+        isOlder(version, ANDROID_TOOLCHAIN.gradle) ? `${head}${ANDROID_TOOLCHAIN.gradle}${tail}` : whole,
+    ),
+  );
+
+  // The plugins block is `id "x" version "y"` in Groovy and
+  // `id("x") version "y"` in the Kotlin DSL — one regex covers both by
+  // treating the parentheses as optional.
+  const settings = firstExisting([
+    path.join(android, 'settings.gradle'),
+    path.join(android, 'settings.gradle.kts'),
+  ]);
+  patchFile(settings, (source) =>
+    pinPluginVersion(
+      pinPluginVersion(source, 'com.android.application', ANDROID_TOOLCHAIN.agp),
+      'org.jetbrains.kotlin.android',
+      ANDROID_TOOLCHAIN.kotlin,
+    ),
+  );
+
+  // AGP 8.11 warns on Java 8, and flutter_angle's own Android code is
+  // compiled at 17 — matching it keeps the build quiet.
+  patchFile(gradleFileForHost(dir), (source) =>
+    source.replace(/JavaVersion\.VERSION_1_8/g, 'JavaVersion.VERSION_17'),
+  );
+}
+
+function patchFile(file: string | null, patch: (source: string) => string): void {
+  if (!file || !fs.existsSync(file)) return;
   const source = fs.readFileSync(file, 'utf8');
-  if (source.includes(ABI_FILTER_MARKER)) return;
-  const anchor = source.indexOf('defaultConfig {');
+  const next = patch(source);
+  if (next !== source) fs.writeFileSync(file, next);
+}
+
+function firstExisting(files: string[]): string | null {
+  return files.find((file) => fs.existsSync(file)) ?? null;
+}
+
+function pinPluginVersion(source: string, pluginId: string, floor: string): string {
+  const pattern = new RegExp(
+    `(id\\s*\\(?\\s*["']${pluginId.replace(/\./g, '\\.')}["']\\s*\\)?\\s+version\\s+["'])(\\d+(?:\\.\\d+)*)(["'])`,
+  );
+  return source.replace(pattern, (whole, head: string, version: string, tail: string) =>
+    isOlder(version, floor) ? `${head}${floor}${tail}` : whole,
+  );
+}
+
+/** Numeric-segment compare; anything unparseable counts as older, so a host
+ * carrying something exotic still gets moved onto a version we know works. */
+function isOlder(version: string, floor: string): boolean {
+  const left = version.split('.').map(Number);
+  const right = floor.split('.').map(Number);
+  for (let i = 0; i < Math.max(left.length, right.length); i += 1) {
+    const a = left[i] ?? 0;
+    const b = right[i] ?? 0;
+    if (Number.isNaN(a)) return true;
+    if (a !== b) return a < b;
+  }
+  return false;
+}
+
+
+// `flutter build apk --target-platform android-arm64` only selects which Flutter
+// engine/app libraries are packaged; jniLibs coming from plugin AARs (libfjs.so,
+// libdartjni.so) are still packaged for every ABI. Flutter passes the same value
+// to Gradle as `-Ptarget-platform`, so drop the unwanted ABIs in the host.
+//
+// This has to be `packaging.jniLibs.excludes`, not `defaultConfig.ndk.abiFilters`:
+// abiFilters governs what the app module's own native build produces, and leaves
+// prebuilt .so files — the ones that come in from plugins — untouched. (AGP 8.11
+// packaged all three ABIs with abiFilters correctly set to just arm64-v8a.)
+//
+// Which DSL the host speaks depends on the Flutter that scaffolded it: the
+// template switched to Kotlin in 3.38, so both shapes are in the wild and a
+// snippet in the wrong language would not even parse.
+export function patchAndroidAbiFilters(dir: string): void {
+  const file = gradleFileForHost(dir);
+  if (!file) return;
+  const kts = file.endsWith('.kts');
+  // strip first, so a host carrying the older abiFilters snippet is migrated
+  // rather than left with two blocks that disagree
+  const source = removeMarkedBlock(fs.readFileSync(file, 'utf8'), ABI_FILTER_MARKER);
+  const anchor = source.indexOf('android {');
   if (anchor < 0) return;
   const insertAt = source.indexOf('\n', anchor) + 1;
-  const snippet = `        ${ABI_FILTER_MARKER}
-        if (project.hasProperty("target-platform")) {
-            def fjsAbis = [
-                "android-arm": "armeabi-v7a",
-                "android-arm64": "arm64-v8a",
-                "android-x64": "x86_64",
-                "android-x86": "x86",
-            ]
-            def fjsSelected = project.property("target-platform").split(",")
-                .collect { fjsAbis[it.trim()] }.findAll { it != null }
-            if (!fjsSelected.isEmpty()) {
-                ndk {
-                    abiFilters.clear()
-                    abiFilters.addAll(fjsSelected)
+  const snippet = kts ? ABI_FILTER_SNIPPET_KTS : ABI_FILTER_SNIPPET_GROOVY;
+  fs.writeFileSync(file, source.slice(0, insertAt) + snippet + source.slice(insertAt));
+}
+
+const ABI_FILTER_SNIPPET_GROOVY = `    ${ABI_FILTER_MARKER}
+    if (project.hasProperty("target-platform")) {
+        def fjsAbis = [
+            "android-arm": "armeabi-v7a",
+            "android-arm64": "arm64-v8a",
+            "android-x64": "x86_64",
+            "android-x86": "x86",
+        ]
+        def fjsKeep = project.property("target-platform").split(",")
+            .collect { fjsAbis[it.trim()] }.findAll { it != null }
+        if (!fjsKeep.isEmpty()) {
+            packaging {
+                jniLibs {
+                    excludes += fjsAbis.values().findAll { !fjsKeep.contains(it) }
+                        .collect { "lib/" + it + "/**" }
                 }
             }
         }
+    }
 
 `;
-  fs.writeFileSync(file, source.slice(0, insertAt) + snippet + source.slice(insertAt));
+
+const ABI_FILTER_SNIPPET_KTS = `    ${ABI_FILTER_MARKER}
+    if (project.hasProperty("target-platform")) {
+        val fjsAbis = mapOf(
+            "android-arm" to "armeabi-v7a",
+            "android-arm64" to "arm64-v8a",
+            "android-x64" to "x86_64",
+            "android-x86" to "x86",
+        )
+        val fjsKeep = (project.property("target-platform") as String)
+            .split(",").mapNotNull { fjsAbis[it.trim()] }
+        if (fjsKeep.isNotEmpty()) {
+            packaging {
+                jniLibs {
+                    excludes += fjsAbis.values.filterNot { it in fjsKeep }.map { "lib/" + it + "/**" }
+                }
+            }
+        }
+    }
+
+`;
+
+/** Cuts out a `<marker>` line and the brace-balanced block that follows it,
+ * so the snippet can be reshaped between releases without the host keeping a
+ * stale copy. Returns the source unchanged when the marker is absent. */
+function removeMarkedBlock(source: string, marker: string): string {
+  const at = source.indexOf(marker);
+  if (at < 0) return source;
+  const lineStart = source.lastIndexOf('\n', at) + 1;
+  let depth = 0;
+  let i = source.indexOf('{', at);
+  if (i < 0) return source;
+  for (; i < source.length; i += 1) {
+    if (source[i] === '{') depth += 1;
+    else if (source[i] === '}') {
+      depth -= 1;
+      if (depth === 0) break;
+    }
+  }
+  let cut = source.indexOf('\n', i);
+  cut = cut < 0 ? source.length : cut + 1;
+  while (source.slice(cut).startsWith('\n')) cut += 1;
+  return source.slice(0, lineStart) + source.slice(cut);
 }
 
 const ANDROID_CONFIG_START = '    <!-- fjs: configured permissions -->';
