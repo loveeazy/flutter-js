@@ -75,6 +75,8 @@ export const ASSET_LOADERS: Record<string, Loader> = {
   '.webp': 'file',
   '.svg': 'file',
   '.woff2': 'file',
+  // glTF binary — three.js/GLTFLoader models (spec 023)
+  '.glb': 'file',
 };
 
 /** Where the `file` loader writes, and what the importing code sees.

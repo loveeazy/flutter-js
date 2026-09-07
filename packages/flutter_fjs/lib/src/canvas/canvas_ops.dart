@@ -183,6 +183,17 @@ class CanvasChunkReader {
     _p += len;
   }
 
+  /// Same intern, u32 length: the webgl family carries whole shader sources
+  /// that exceed the 64 KiB a u16 can express (spec 023). The 2d display
+  /// list keeps the u16 form.
+  void readStrDef32() {
+    final id = u16();
+    final len = u32();
+    _need(len);
+    strings[id] = utf8.decode(bytes.sublist(_p, _p + len));
+    _p += len;
+  }
+
   Uint8List sub(int len) {
     _need(len);
     final out = Uint8List.sublistView(bytes, _p, _p + len);

@@ -3,6 +3,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi' as ffi;
+import 'dart:io' show Platform;
 
 import 'package:ffi/ffi.dart';
 import 'package:flutter/foundation.dart';
@@ -62,6 +63,7 @@ class FjsEngine extends ChangeNotifier {
     _bind();
     _createVm();
     _setupWorkerModules();
+    _setupPlatformModule();
     _setupNavModules();
     _setupAnimationFrameModule();
     _setupCanvasModule();
@@ -69,10 +71,15 @@ class FjsEngine extends ChangeNotifier {
   }
 
   /// Backs the runtime's fetch() — see http.dart for the wire protocol.
-  late final FjsHttp _http = FjsHttp(dispatchEvent: (id, type, {String? text}) {
-    if (_disposed || _vm == null) return;
-    dispatchEvent(id, type, text: text);
-  });
+  late final FjsHttp _http = FjsHttp(
+    dispatchEvent: (id, type, {String? text}) {
+      if (_disposed || _vm == null) return;
+      dispatchEvent(id, type, text: text);
+    },
+    // root-relative fetch URLs resolve against the dev server, the same
+    // closure the canvas image loader uses
+    devUri: () => devUri,
+  );
 
   final Map<int, FjsWorker> _workers = {};
 
@@ -269,6 +276,17 @@ class FjsEngine extends ChangeNotifier {
         _beginRoutePop(_navStack.last.key);
         return true;
       });
+  }
+
+  /// Tells JS which platform the engine runs on ('android' / 'ios' / ...,
+  /// straight from dart:io). The one thing a cross-platform GL page cannot
+  /// sense for itself: Android presents the framebuffer bottom-up while the
+  /// browser and iOS present top-down, so a projection needs to know
+  /// (spec 023).
+  void _setupPlatformModule() {
+    host.register('fjs.platform', (args) {
+      return Platform.operatingSystem;
+    });
   }
 
   void _setupCanvasModule() {

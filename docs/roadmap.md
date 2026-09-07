@@ -293,10 +293,19 @@ Volar 插件（`volar.cjs`）。`form` 之所以从没暴露这个问题，是�
   Dart 3.10——更低的 CFE 编译 flutter_angle 会崩，见 toolchain。webgl 坐标是
   位图像素（页面自己处理 dpr），与 2d 的逻辑像素契约不同，见 canvas-compat。
 
+- ✅ **three.js 跑通**（spec 023，`examples/hello-fjs/src/pages/example/three-gltf.vue`）：
+  GLTFLoader 加载 Xbot.glb、单指拖拽旋转。为此补齐：WebGL2 的 VAO 与
+  `texStorage2D` / `texSubImage2D(source)` 命令（App 侧 `UNPACK_FLIP_Y_WEBGL`
+  随命令携带、Dart 按行翻转）；`getShaderPrecisionFormat`（App 侧按 WebGL2
+  下限常量作答——flutter_angle 的实现是全零 stub，照抄会让 three 选 lowp）；
+  native polyfill（TextDecoder / Blob / object URL / fetch 拦截 /
+  createImageBitmap → data: URL → 宿主解码）；fetch 的根相对 URL 在 dev 下按
+  dev server 解析（`FjsHttp` 拿到与 canvas 图片同一个 devUri 闭包）。
+  未承诺：three 的后处理、WebXR、Draco/KTX2（依赖 `getExtension` 扩展，恒 null）。
+
 支持范围与两端差异：[canvas-compat.md](canvas-compat.md)。未做且已登记：
-WebGL 扩展（`getExtension`）、`readPixels`、WebGL2 专属 API（VAO/instancing，
-App 侧）、GL 指令去重、`getImageData` / `putImageData`、`filter`、
-`OffscreenCanvas`、离屏 canvas。
+WebGL 扩展（`getExtension`）、`readPixels`、instancing、GL 指令去重、
+`getImageData` / `putImageData`、`filter`、`OffscreenCanvas`、离屏 canvas。
 
 ## 近期计划
 

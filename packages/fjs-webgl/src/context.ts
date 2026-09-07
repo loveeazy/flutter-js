@@ -255,6 +255,14 @@ export const GL = {
   TEXTURE_BINDING_2D: 0x8069,
   TEXTURE_BINDING_CUBE_MAP: 0x8514,
   TEXTURE_CUBE_MAP_POSITIVE_X: 0x8515,
+  /* 3D / array textures — three.js's WebGLState creates empty ones at
+   * renderer init, so these constants must exist or the empty-texture
+   * factory compares undefined === undefined and walks into texImage3D
+   * with the wrong target (spec 023 iOS bring-up) */
+  TEXTURE_3D: 0x806f,
+  TEXTURE_2D_ARRAY: 0x8c1a,
+  TEXTURE_BINDING_3D: 0x806a,
+  TEXTURE_BINDING_2D_ARRAY: 0x8c1d,
   TEXTURE_CUBE_MAP_NEGATIVE_X: 0x8516,
   TEXTURE_CUBE_MAP_POSITIVE_Y: 0x8517,
   TEXTURE_CUBE_MAP_NEGATIVE_Y: 0x8518,
@@ -302,6 +310,7 @@ export const GL = {
   VERTEX_ATTRIB_ARRAY_TYPE: 0x8625,
   VERTEX_ATTRIB_ARRAY_NORMALIZED: 0x886a,
   VERTEX_ATTRIB_ARRAY_BUFFER_BINDING: 0x889f,
+  VERTEX_ARRAY_BINDING: 0x85b5,
   CURRENT_PROGRAM: 0x8b8d,
   /* Shaders */
   VERTEX_SHADER: 0x8b31,
@@ -325,7 +334,13 @@ export const GL = {
 
 /** Accepts a TypedArray, a number[] or null for the fv / matrix / pixel
  * arguments. */
-type NumericArg = number[] | Float32Array | Int32Array | Uint8Array | null;
+type NumericArg =
+  | number[]
+  | Float32Array
+  | Int32Array
+  | Uint8Array
+  | Uint32Array
+  | null;
 
 function toArray(v: NumericArg): number[] {
   if (!v) return [];
@@ -472,6 +487,21 @@ export class FjsWebGLRenderingContext {
     if (id) this.writer.deleteTexture(id);
   }
 
+  createVertexArray(): FjsWebGLObject {
+    const res = new FjsWebGLObject('WebGLVertexArrayObject', this.nextId());
+    this.writer.createVertexArray(res.id);
+    return res;
+  }
+
+  bindVertexArray(res: Resource): void {
+    this.writer.bindVertexArray(resourceId(res));
+  }
+
+  deleteVertexArray(res: Resource): void {
+    const id = resourceId(res);
+    if (id) this.writer.deleteVertexArray(id);
+  }
+
   createShader(type: number): FjsWebGLObject | null {
     if (type !== GL.VERTEX_SHADER && type !== GL.FRAGMENT_SHADER) {
       warnWebglOnce(
@@ -592,7 +622,14 @@ export class FjsWebGLRenderingContext {
     this.writer.lineWidth(width);
   }
 
+  // The one exception to "no state machine": UNPACK_FLIP_Y_WEBGL. three.js
+  // sets it before every image-texture upload and the Dart decoder has no
+  // state to remember it, so the value rides along on TexImage2DSource (see
+  // protocol.ts) and the host flips the cached RGBA rows when it is set.
+  private unpackFlipY = false;
+
   pixelStorei(pname: number, param: number): void {
+    if (pname === GL.UNPACK_FLIP_Y_WEBGL) this.unpackFlipY = param !== 0;
     this.writer.pixelStorei(pname, param);
   }
 
@@ -686,6 +723,7 @@ export class FjsWebGLRenderingContext {
           format,
           type,
           source.handle,
+          this.unpackFlipY,
         );
         return;
       }
@@ -722,10 +760,36 @@ export class FjsWebGLRenderingContext {
   }
 
   texSubImage2D(...args: unknown[]): void {
-    if (args.length === 6) {
+    // 7 args: the DOM's source form (target, level, x, y, format, type,
+    // image) — one more pair than texImage2D's 6-arg source form because a
+    // sub-image needs its offset. 9 args: the pixel form.
+    if (args.length === 7) {
+      const [target, level, xoffset, yoffset, format, type, source] = args as [
+        number,
+        number,
+        number,
+        number,
+        number,
+        number,
+        unknown,
+      ];
+      if (source instanceof FjsCanvasImage) {
+        this.writer.texSubImage2DSource(
+          target,
+          level,
+          xoffset,
+          yoffset,
+          format,
+          type,
+          source.handle,
+          this.unpackFlipY,
+        );
+        return;
+      }
       warnWebglOnce(
         'webgl-tex-sub-source',
-        'gl.texSubImage2D(): source upload is not supported; pass pixels.',
+        'gl.texSubImage2D(): the only supported source is the image object ' +
+          'returned by loadImage()/FjsCanvasImage.',
       );
       return;
     }
@@ -751,6 +815,72 @@ export class FjsWebGLRenderingContext {
       format,
       type,
       toBytes(pixels),
+    );
+  }
+
+  texStorage2D(
+    target: number,
+    levels: number,
+    internalformat: number,
+    width: number,
+    height: number,
+  ): void {
+    this.writer.texStorage2D(target, levels, internalformat, width, height);
+  }
+
+  texImage3D(
+    target: number,
+    level: number,
+    internalformat: number,
+    width: number,
+    height: number,
+    depth: number,
+    border: number,
+    format: number,
+    type: number,
+    pixels?: NumericArg,
+  ): void {
+    // no source-object form: a 3D/array texture's depth has no DOM image
+    // analogue, so pixels-only is the whole API here
+    this.writer.texImage3D(
+      target,
+      level,
+      internalformat,
+      width,
+      height,
+      depth,
+      border,
+      format,
+      type,
+      toBytes(pixels ?? new Uint8Array(0)),
+    );
+  }
+
+  texSubImage3D(
+    target: number,
+    level: number,
+    xoffset: number,
+    yoffset: number,
+    zoffset: number,
+    width: number,
+    height: number,
+    depth: number,
+    format: number,
+    type: number,
+    pixels?: NumericArg,
+  ): void {
+    this.writer.texSubImage3D(
+      target,
+      level,
+      xoffset,
+      yoffset,
+      zoffset,
+      width,
+      height,
+      depth,
+      format,
+      type,
+      toBytes(pixels ?? new Uint8Array(0)),
     );
   }
 
@@ -829,6 +959,10 @@ export class FjsWebGLRenderingContext {
     offset: number,
   ): void {
     this.writer.vertexAttribPointer(index, size, type, normalized, stride, offset);
+  }
+
+  vertexAttribDivisor(index: number, divisor: number): void {
+    this.writer.vertexAttribDivisor(index, divisor);
   }
 
   vertexAttrib1f(index: number, x: number): void {
@@ -1026,8 +1160,38 @@ export class FjsWebGLRenderingContext {
   }
 
   /** A scalar pname returns a number; an array pname (VIEWPORT, DEPTH_RANGE,
-   * SCISSOR_BOX, COLOR_CLEAR_VALUE, …) returns number[]. */
-  getParameter(pname: number): number | number[] | boolean | null {
+   * SCISSOR_BOX, COLOR_CLEAR_VALUE, …) returns number[]. The string pnames
+   * are answered here, not over the ABI: flutter_angle's getParameter only
+   * implements a fixed list of integer keys and throws on the rest, and
+   * three.js's WebGLState calls `.indexOf` on VERSION during renderer init —
+   * a null there aborts the whole page. The read-back pair is the GLES3
+   * guaranteed combination (RGBA/UNSIGNED_BYTE).
+   *
+   * SCISSOR_BOX/VIEWPORT are also answered locally: the plugin's
+   * GetIntegerv path copies 4 slots but returns only the FIRST component,
+   * so the array pnames cannot cross this bridge faithfully. The initial
+   * values below are the WebGL defaults; three reads them once into its
+   * current-state cache and immediately overwrites them from
+   * renderer.setSize/state.viewport on the first render, so only the
+   * shape (4 numbers) matters, not the values. */
+  getParameter(pname: number): number | number[] | boolean | string | null {
+    switch (pname) {
+      case GL.VERSION:
+        return 'WebGL 2.0 (fjs)';
+      case GL.SHADING_LANGUAGE_VERSION:
+        return 'WebGL GLSL ES 3.00 (fjs)';
+      case GL.RENDERER:
+      case GL.VENDOR:
+        return 'fjs (ANGLE)';
+      case GL.IMPLEMENTATION_COLOR_READ_TYPE:
+        return GL.UNSIGNED_BYTE;
+      case GL.IMPLEMENTATION_COLOR_READ_FORMAT:
+        return GL.RGBA;
+      case GL.SCISSOR_BOX:
+        return [0, 0, 0, 0];
+      case GL.VIEWPORT:
+        return [0, 0, this.canvas.width, this.canvas.height];
+    }
     const result = this.q<number | number[] | boolean | string | null>(
       'getParameter',
       pname,
@@ -1039,9 +1203,13 @@ export class FjsWebGLRenderingContext {
     return this.q<Record<string, boolean>>('getContextAttributes') ?? null;
   }
 
-  /** Registered extensions only — and none are registered (spec 021 §2). */
+  /** Registered extensions only — and none are registered (spec 021 §2).
+   * The host answers the JSON string "[]" (v1 ABI lists cross as JSON), so
+   * it goes through the same unpack as getParameter. */
   getSupportedExtensions(): string[] {
-    return this.q<string[]>('getSupportedExtensions') ?? [];
+    return this.unpackMaybeJson<string[]>(
+      this.q<string | null>('getSupportedExtensions'),
+    ) ?? [];
   }
 
   getExtension(name: string): null {
@@ -1076,32 +1244,73 @@ export class FjsWebGLRenderingContext {
     );
   }
 
-  getShaderInfoLog(shader: Resource): string | null {
-    return this.q<string | null>('getShaderInfoLog', resourceId(shader));
+  /** The DOM returns a STRING from the info-log/source queries even on
+   * success — an empty one, which `.trim()` callers in three.js depend on.
+   * flutter_angle's null (GLES writes no log on success) becomes '' here,
+   * and a failed lookup (Dart-side exception over the ABI) degrades to ''
+   * too: these are diagnostics, they must never kill the render loop. */
+  getShaderInfoLog(shader: Resource): string {
+    try {
+      return this.q<string | null>('getShaderInfoLog', resourceId(shader)) ?? '';
+    } catch {
+      return '';
+    }
   }
 
-  getProgramInfoLog(program: Resource): string | null {
-    return this.q<string | null>('getProgramInfoLog', resourceId(program));
+  getProgramInfoLog(program: Resource): string {
+    try {
+      return this.q<string | null>('getProgramInfoLog', resourceId(program)) ?? '';
+    } catch {
+      return '';
+    }
   }
 
-  getShaderSource(shader: Resource): string | null {
-    return this.q<string | null>('getShaderSource', resourceId(shader));
+  /** Answered client-side, not over the ABI: flutter_angle 0.4.2's
+   * getShaderPrecisionFormat is a stub returning an all-zero
+   * ShaderPrecisionFormat, and three.js turns zeros into 'lowp' shaders.
+   * The real values on every ANGLE surface this module runs on (Metal,
+   * Vulkan, GL, D3D — WebGL2 requires highp in both stages) are the
+   * WebGL2 spec's minimum highp float/int figures; lying smaller would
+   * only make three pick a worse precision, never a wrong one. */
+  getShaderPrecisionFormat(
+    shadertype: number,
+    precisiontype: number,
+  ): { rangeMin: number; rangeMax: number; precision: number } {
+    if (precisiontype === GL.HIGH_INT || precisiontype === GL.MEDIUM_INT ||
+        precisiontype === GL.LOW_INT) {
+      // WebGL2 guarantees 31-bit mantissa integers in every stage
+      return { rangeMin: 31, rangeMax: 30, precision: 0 };
+    }
+    return { rangeMin: 127, rangeMax: 127, precision: 23 };
   }
 
-  /** `{ name, size, type }` on both platforms. */
+  /** Same DOM string semantics as the info logs (flutter_angle's
+   * getShaderSource is unimplemented and answers null). */
+  getShaderSource(shader: Resource): string {
+    return this.q<string | null>('getShaderSource', resourceId(shader)) ?? '';
+  }
+
+  /** `{ name, size, type }` on both platforms. The Dart side answers a JSON
+   * string (v1 ABI carries objects stringified) — it MUST be unpacked here:
+   * three.js reads `.name` off the result, and the raw string's `.name` is
+   * undefined, which used to blow up parseUniform (spec 023 iOS). */
   getActiveAttrib(program: Resource, index: number): { name: string; size: number; type: number } | null {
-    return this.q<{ name: string; size: number; type: number } | null>(
-      'getActiveAttrib',
-      resourceId(program),
-      index,
+    return this.unpackMaybeJson<{ name: string; size: number; type: number } | null>(
+      this.q<string | null>(
+        'getActiveAttrib',
+        resourceId(program),
+        index,
+      ),
     );
   }
 
   getActiveUniform(program: Resource, index: number): { name: string; size: number; type: number } | null {
-    return this.q<{ name: string; size: number; type: number } | null>(
-      'getActiveUniform',
-      resourceId(program),
-      index,
+    return this.unpackMaybeJson<{ name: string; size: number; type: number } | null>(
+      this.q<string | null>(
+        'getActiveUniform',
+        resourceId(program),
+        index,
+      ),
     );
   }
 
@@ -1174,8 +1383,10 @@ export class FjsWebGLRenderingContext {
    * list; scalars pass through untouched. The call sites know which GL type
    * the pname returns — hence the generic. */
   private unpackMaybeJson<T>(
-    value: number | number[] | boolean | string | null,
+    value: number | number[] | boolean | string | null | undefined,
   ): T {
+    // Dart null crosses the ABI as undefined; both mean "no answer".
+    if (value === undefined || value === null) return null as T;
     if (typeof value !== 'string') return value as T;
     try {
       const parsed: unknown = JSON.parse(value);
@@ -1183,6 +1394,9 @@ export class FjsWebGLRenderingContext {
       if (typeof parsed === 'number' || typeof parsed === 'boolean') {
         return parsed as T;
       }
+      // a plain object (getActiveUniform's {name,size,type}) — anything
+      // else is not a shape the ABI could have produced
+      if (typeof parsed === 'object' && parsed !== null) return parsed as T;
       return null as T;
     } catch {
       return null as T;

@@ -92,6 +92,7 @@ WeUI 的 10% 黑遮罩 —— 取舍写在 `specs/007-form-components/plan.md` �
 | `import png from '@/assets/x.png'` | `/assets/x-<hash>.png` | 站点根 | 连着 `fjs dev` 时问 dev server，否则 `assets/fjs/public/assets/x-<hash>.png` |
 | `src="/images/x.png"`（`public/` 下的文件） | 原样 | 站点根 | 同上，release 时是 `assets/fjs/public/images/x.png` |
 | `src="https://…"` | 原样 | `<img>`，缓存交给浏览器 | `cached_network_image`，带内存/磁盘缓存 |
+| `src="data:image/…;base64,…"` | 原样 | `<img>`，浏览器原生解码 | `MemoryImage`（spec 023：给内存中的字节一条进宿主解码器的路，three.js 的 createImageBitmap 走它）|
 
 `asset://x` 是旧写法，等价于 `/x`，两端都还认。
 

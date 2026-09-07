@@ -45,6 +45,10 @@ class FakeBindings extends FjsGlBindings {
   void createTexture(int id) {}
   @override
   void deleteTexture(int id) {}
+  @override
+  void createVertexArray(int id) => record('createVertexArray', [id]);
+  @override
+  void deleteVertexArray(int id) => record('deleteVertexArray', [id]);
 
   // binding & state
   @override
@@ -57,6 +61,8 @@ class FakeBindings extends FjsGlBindings {
   void bindRenderbuffer(int target, int id) {}
   @override
   void bindTexture(int target, int id) {}
+  @override
+  void bindVertexArray(int id) => record('bindVertexArray', [id]);
   @override
   void blendColor(double r, double g, double b, double a) {}
   @override
@@ -131,10 +137,34 @@ class FakeBindings extends FjsGlBindings {
       int height, int border, int format, int type, Uint8List pixels) {}
   @override
   void texImage2DSource(int target, int level, int internalformat,
-      int format, int type, int handle) {}
+      int format, int type, int handle, bool flipY) {
+    record('texImage2DSource', [target, level, internalformat, format, type, handle, flipY]);
+  }
   @override
   void texSubImage2D(int target, int level, int xoffset, int yoffset,
       int width, int height, int format, int type, Uint8List pixels) {}
+  @override
+  void texSubImage2DSource(int target, int level, int xoffset, int yoffset,
+      int format, int type, int handle, bool flipY) {
+    record('texSubImage2DSource', [target, level, xoffset, yoffset, format, type, handle, flipY]);
+  }
+  @override
+  void texStorage2D(int target, int levels, int internalformat, int width,
+      int height) {
+    record('texStorage2D', [target, levels, internalformat, width, height]);
+  }
+  @override
+  void texImage3D(int target, int level, int internalformat, int width,
+      int height, int depth, int border, int format, int type,
+      Uint8List pixels) {
+    record('texImage3D', [target, width, height, depth]);
+  }
+  @override
+  void texSubImage3D(int target, int level, int xoffset, int yoffset,
+      int zoffset, int width, int height, int depth, int format, int type,
+      Uint8List pixels) {
+    record('texSubImage3D', [target, xoffset, yoffset, zoffset, depth]);
+  }
   @override
   void texParameterf(int target, int pname, double param) {}
   @override
@@ -173,6 +203,11 @@ class FakeBindings extends FjsGlBindings {
   void vertexAttribPointer(
       int index, int size, int type, bool normalized, int stride, int offset) {
     record('vertexAttribPointer', [index, size, type, normalized, offset]);
+  }
+
+  @override
+  void vertexAttribDivisor(int index, int divisor) {
+    record('vertexAttribDivisor', [index, divisor]);
   }
 
   @override
@@ -388,6 +423,144 @@ void main() {
 
     expect(() => decoder.run(w.take()), throwsA(isA<CanvasOpException>()));
     expect(fake.calls.where((c) => c.$1 == 'drawArrays'), isEmpty);
+  });
+
+  test('vertex array create/bind/delete round-trips (spec 023)', () {
+    final fake = FakeBindings();
+    final decoder = WebglChunkDecoder(fake);
+    final w = ChunkWriter();
+
+    w.cmd(WebglCmd.createVertexArray);
+    w.u32(9);
+    w.cmd(WebglCmd.bindVertexArray);
+    w.u32(9);
+    w.cmd(WebglCmd.bindVertexArray);
+    w.u32(0); // unbind — the DOM's null object
+    w.cmd(WebglCmd.deleteVertexArray);
+    w.u32(9);
+
+    decoder.run(w.take());
+
+    final names = fake.calls.map((c) => c.$1).toList();
+    expect(names, ['createVertexArray', 'bindVertexArray', 'bindVertexArray', 'deleteVertexArray']);
+    expect(fake.calls[0].$2, [9]);
+    expect(fake.calls[1].$2, [9]);
+    expect(fake.calls[2].$2, [0]);
+    expect(fake.calls[3].$2, [9]);
+  });
+
+  test('texImage2DSource carries the flipY flag', () {
+    final fake = FakeBindings();
+    final decoder = WebglChunkDecoder(fake);
+    final w = ChunkWriter();
+
+    for (final flip in [0, 1]) {
+      w.cmd(WebglCmd.texImage2DSource);
+      w.u32(0x0de1); // TEXTURE_2D
+      w.u32(0); // level
+      w.u32(0x1908); // internalformat RGBA
+      w.u32(0x1908); // format
+      w.u32(0x1401); // type UNSIGNED_BYTE
+      w.u32(1); // TexSource.imageHandle
+      w.u32(4); // image handle
+      w.u8(flip);
+    }
+
+    decoder.run(w.take());
+
+    expect(fake.calls[0].$2[6], isFalse);
+    expect(fake.calls[1].$2[6], isTrue);
+  });
+
+  test('texStorage2D + texSubImage2D(source) round-trips (spec 023)', () {
+    final fake = FakeBindings();
+    final decoder = WebglChunkDecoder(fake);
+    final w = ChunkWriter();
+
+    w.cmd(WebglCmd.texStorage2D);
+    w.u32(0x0de1); // TEXTURE_2D
+    w.u32(1); // levels
+    w.u32(0x8058); // RGBA8
+    w.u32(512);
+    w.u32(256);
+    w.cmd(WebglCmd.texSubImage2DSource);
+    w.u32(0x0de1);
+    w.u32(0); // level
+    w.u32(0); // x
+    w.u32(0); // y
+    w.u32(0x1908); // format RGBA
+    w.u32(0x1401); // type UNSIGNED_BYTE
+    w.u32(1); // TexSource.imageHandle
+    w.u32(4); // image handle
+    w.u8(1); // flipY
+
+    decoder.run(w.take());
+
+    expect(fake.calls, hasLength(2));
+    expect(fake.calls[0].$1, 'texStorage2D');
+    expect(fake.calls[0].$2, [0x0de1, 1, 0x8058, 512, 256]);
+    expect(fake.calls[1].$1, 'texSubImage2DSource');
+    expect(fake.calls[1].$2, [0x0de1, 0, 0, 0, 0x1908, 0x1401, 4, true]);
+  });
+
+  test('texImage3D / texSubImage3D round-trip with depth (spec 023)', () {
+    final fake = FakeBindings();
+    final decoder = WebglChunkDecoder(fake);
+    final w = ChunkWriter();
+
+    w.cmd(WebglCmd.texImage3D);
+    w.u32(0x806f); // TEXTURE_3D
+    w.u32(0); // level
+    w.u32(0x1908); // RGBA
+    w.u32(2);
+    w.u32(2);
+    w.u32(2); // depth
+    w.u32(0); // border
+    w.u32(0x1908);
+    w.u32(0x1401);
+    w.u32(4); // bytes (tiny; sizes don't matter to the decoder)
+    w.bytes.add([1, 2, 3, 4]);
+    w.cmd(WebglCmd.texSubImage3D);
+    w.u32(0x806f);
+    w.u32(0);
+    w.u32(0);
+    w.u32(0);
+    w.u32(1); // z
+    w.u32(2);
+    w.u32(2);
+    w.u32(1);
+    w.u32(0x1908);
+    w.u32(0x1401);
+    w.u32(0); // empty payload
+
+    decoder.run(w.take());
+
+    expect(fake.calls[0].$1, 'texImage3D');
+    expect(fake.calls[0].$2, [0x806f, 2, 2, 2]);
+    expect(fake.calls[1].$1, 'texSubImage3D');
+    expect(fake.calls[1].$2, [0x806f, 0, 0, 1, 1]);
+  });
+
+  test('StrDef32 interns strings longer than 64 KiB (spec 023)', () {
+    final fake = FakeBindings();
+    final decoder = WebglChunkDecoder(fake);
+    final w = ChunkWriter();
+
+    // strDef32: u16 cmd, u16 str id, u32 len, utf8
+    w.cmd(WebglCmd.strDef32);
+    w.u16(1);
+    final longSource = 'void main() { //' + ('x' * 70000) + '}';
+    final encoded = utf8.encode(longSource);
+    final len = encoded.length;
+    w.u32(len);
+    w.bytes.add(encoded);
+    w.cmd(WebglCmd.shaderSource);
+    w.u32(7);
+    w.u16(1);
+
+    decoder.run(w.take());
+
+    expect(fake.shaderSources[7], longSource);
   });
 
   test('mat4 uniform keeps transpose and all 16 floats', () {

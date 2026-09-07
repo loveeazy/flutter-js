@@ -26,12 +26,20 @@ import 'registry/host.dart';
 
 /// Owns the HttpClient and the in-flight requests for one engine.
 class FjsHttp {
-  FjsHttp({required this.dispatchEvent, HttpClient? client})
+  FjsHttp({required this.dispatchEvent, this.devUri, HttpClient? client})
       : _client = client ?? HttpClient();
 
   /// Delivers the response back into the VM (the engine's dispatchEvent).
   final void Function(int requestId, int eventType, {String? text})
       dispatchEvent;
+
+  /// The dev server a root-relative URL resolves against — the same closure
+  /// the canvas host modules get. A browser resolves `/x` against the page
+  /// origin (the dev server), so JS fetch of a bundled asset (`import x
+  /// from '@/assets/x.glb'`) has to land on the same URL here (spec 023).
+  /// No dev server means there is nothing for a relative URL to mean; the
+  /// request fails with that message rather than silently.
+  final Uri? Function()? devUri;
 
   final HttpClient _client;
   final Map<int, HttpClientRequest> _inFlight = {};
@@ -135,7 +143,10 @@ class FjsHttp {
   Future<void> _run(int id, String requestJson) async {
     try {
       final spec = jsonDecode(requestJson) as Map<String, Object?>;
-      final url = Uri.parse(spec['url']?.toString() ?? '');
+      final raw = Uri.parse(spec['url']?.toString() ?? '');
+      final url = raw.isAbsolute
+          ? raw
+          : _resolveRelative(raw);
       final method = (spec['method']?.toString() ?? 'GET').toUpperCase();
       final timeoutMs = (spec['timeoutMs'] as num?)?.toInt();
 
@@ -236,6 +247,16 @@ class FjsHttp {
     if (e is TimeoutException) return e.message ?? 'request timed out';
     if (e is FormatException) return 'bad request or URL: ${e.message}';
     return e.toString();
+  }
+
+  Uri _resolveRelative(Uri raw) {
+    final base = devUri?.call();
+    if (base == null) {
+      throw FormatException(
+          'relative fetch URL "$raw" needs a dev server connection to '
+          'resolve against (a release asset must be fetched some other way)');
+    }
+    return base.resolve(raw.toString());
   }
 
   /// Drops the in-flight JS requests. Used on VM reset (hot reload): the

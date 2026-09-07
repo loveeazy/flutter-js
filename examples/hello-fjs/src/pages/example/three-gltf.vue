@@ -1,0 +1,229 @@
+<route>
+{"title": "three.js glTF", "group": "画布演示"}
+</route>
+
+<script setup lang="ts">
+// three.js glTF viewer (spec 023): Xbot renders through three's
+// WebGLRenderer on the same canvas.getContext('webgl2') the triangle page
+// uses — three is the first real consumer of the vertex-array /
+// texStorage2D / texSubImage2D(source) commands this spec added.
+//
+// Import order matters: the polyfill module installs three's DOM
+// expectations (TextDecoder, Blob, object URLs, fetch interception,
+// createImageBitmap) before anything of three's can run. On web that module
+// is a no-op and three hits the browser's natives — same source, both ends.
+import '@/three/native-polyfills';
+import '@ufjs/webgl';
+import { ref, onUnmounted } from 'vue';
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { invokeHost, hasNativeHost } from 'fjs';
+import type { FjsCanvasApi, FjsTouchEvent } from 'fjs';
+import Panel from '@/components/Panel.vue';
+import modelUrl from '@/assets/Xbot.glb';
+
+defineOptions({ name: 'ThreeGltfPage' });
+
+const cv = ref();
+const status = ref('等待画布…');
+
+let renderer: THREE.WebGLRenderer | null = null;
+let scene: THREE.Scene | null = null;
+let camera: THREE.PerspectiveCamera | null = null;
+let raf = 0;
+// render on demand — see gltf-viewer.vue; a continuous loop fights the
+// route pop transition on Android
+let needsRender = false;
+function requestRender(): void {
+  needsRender = true;
+}
+
+// orbit state — one finger drags yaw/pitch; three's OrbitControls needs DOM
+// pointer/wheel events this surface does not raise, so the math is here
+let yaw = 0.5;
+let pitch = 0.15;
+const target = new THREE.Vector3(0, 0.85, 0);
+const distance = 3.4;
+let lastX = 0;
+let lastY = 0;
+let dragging = false;
+
+/** three's renderer expects the DOM canvas: it registers a contextlost
+ * listener, writes width/height in setSize, and pokes style. The fjs
+ * canvas object has none of those members, so a literal shim carries the
+ * contract; the GL calls go through the context handed to the renderer
+ * options, which is the same one every draw in this module drives. */
+function asDomCanvas(instance: FjsCanvasApi): HTMLCanvasElement {
+  const dpr = instance.devicePixelRatio;
+  return {
+    width: instance.width * dpr,
+    height: instance.height * dpr,
+    style: {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    getContext: () => null,
+  } as unknown as HTMLCanvasElement;
+}
+
+function updateCamera() {
+  if (!camera) return;
+  const cp = Math.cos(pitch);
+  camera.position.set(
+    target.x + distance * cp * Math.sin(yaw),
+    target.y + distance * Math.sin(pitch),
+    target.z + distance * cp * Math.cos(yaw),
+  );
+  camera.lookAt(target);
+}
+
+function onTouchStart(e: FjsTouchEvent) {
+  const t = e.touches[0];
+  if (!t) return;
+  dragging = true;
+  lastX = t.offsetX;
+  lastY = t.offsetY;
+}
+
+function onTouchMove(e: FjsTouchEvent) {
+  if (!dragging) return;
+  const t = e.touches[0];
+  if (!t) return;
+  yaw -= (t.offsetX - lastX) * 0.01;
+  // clamp so the camera cannot flip over the pole
+  pitch = Math.max(-1.2, Math.min(1.2, pitch + (t.offsetY - lastY) * 0.008));
+  lastX = t.offsetX;
+  lastY = t.offsetY;
+  updateCamera();
+  requestRender();
+}
+
+function onTouchEnd() {
+  dragging = false;
+}
+
+function loop() {
+  raf = requestAnimationFrame(loop);
+  if (!needsRender) return;
+  needsRender = false;
+  if (renderer && scene && camera) renderer.render(scene, camera);
+}
+
+function loadModel() {
+  status.value = '模型加载中…';
+  new GLTFLoader()
+    .loadAsync(modelUrl)
+    .then((gltf) => {
+      if (!scene) return;
+      const model = gltf.scene;
+      // normalize: center at the origin, height at a known 1.7 — the orbit
+      // target and camera distance stay fixed whatever the asset's units
+      const box = new THREE.Box3().setFromObject(model);
+      const size = box.getSize(new THREE.Vector3());
+      const center = box.getCenter(new THREE.Vector3());
+      const scale = 1.7 / (size.y || 1);
+      model.position.sub(center).multiplyScalar(scale);
+      model.scale.setScalar(scale);
+      scene.add(model);
+      status.value = '拖动模型旋转';
+      requestRender();
+    })
+    .catch((e: unknown) => {
+      // load failures must be visible, not silent (constitution V)
+      const message =
+        e instanceof Error ? e.message : typeof e === 'string' ? e : '未知错误';
+      status.value = `加载失败：${message}`;
+    });
+}
+
+function onResize() {
+  const instance = cv.value as FjsCanvasApi | undefined;
+  if (!instance || renderer) return;
+  // webgl2 → webgl fallback, three.js's own chain; the context claim happens
+  // once — three holds it for the page's lifetime
+  const ctx = (instance.getContext('webgl2') ??
+    instance.getContext('webgl')) as unknown as
+    | WebGLRenderingContext
+    | null;
+  if (!ctx) {
+    status.value = '此环境没有 WebGL';
+    return;
+  }
+
+  renderer = new THREE.WebGLRenderer({
+    canvas: asDomCanvas(instance),
+    context: ctx,
+    antialias: true,
+  });
+  renderer.setPixelRatio(instance.devicePixelRatio);
+  renderer.setSize(instance.width, instance.height, false);
+
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x15181c);
+
+  camera = new THREE.PerspectiveCamera(
+    45,
+    instance.width / (instance.height || 1),
+    0.1,
+    100,
+  );
+  // Android presents the GL framebuffer bottom-up (SurfaceTexture keeps
+  // GL's origin); the browser and the iOS IOSurface texture present
+  // top-down. Mirror the projection's Y so the model lands upright — and
+  // DON'T call updateProjectionMatrix afterwards, that would rebuild the
+  // matrix and undo the flip.
+  if (hasNativeHost) {
+    let platform = '';
+    try {
+      platform = invokeHost<string>('fjs.platform') ?? '';
+    } catch {
+      platform = '';
+    }
+    if (platform === 'android') {
+      camera.projectionMatrix.elements[5] *= -1;
+      camera.projectionMatrix.elements[13] *= -1;
+    }
+  }
+
+  // Xbot ships PBR materials: hemisphere for fill, one directional for form
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x444455, 1.4));
+  const sun = new THREE.DirectionalLight(0xffffff, 2.4);
+  sun.position.set(2, 4, 3);
+  scene.add(sun);
+
+  updateCamera();
+  requestRender();
+  loadModel();
+  loop();
+}
+
+onUnmounted(() => cancelAnimationFrame(raf));
+</script>
+
+<template>
+  <Panel title="three.js glTF" desc="GLTFLoader 加载 Xbot，ANGLE/浏览器执行 three 渲染">
+    <canvas
+      ref="cv"
+      class="gl"
+      @resize="onResize"
+      @touchstart="onTouchStart"
+      @touchmove="onTouchMove"
+      @touchend="onTouchEnd"
+      @touchcancel="onTouchEnd"
+    />
+    <text class="tip">{{ status }}</text>
+  </Panel>
+</template>
+
+<style scoped>
+.gl {
+  width: 340px;
+  height: 340px;
+  border-radius: 8px;
+  background: #15181c;
+}
+.tip {
+  font-size: 12px;
+  color: #888;
+  margin-top: 8px;
+}
+</style>

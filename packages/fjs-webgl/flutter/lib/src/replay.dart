@@ -31,6 +31,9 @@ import 'package:flutter_fjs/flutter_fjs.dart'
 /// GL command ids. Twin of @ufjs/webgl's `WebglCmd`.
 abstract final class WebglCmd {
   static const strDef = 0x0001;
+  // u16 id, u32 len, utf8 — three.js's shader sources exceed the 64 KiB a
+  // u16 length can express (spec 023 iOS)
+  static const strDef32 = 0x0002;
 
   // resources
   static const createBuffer = 0x0101;
@@ -92,6 +95,13 @@ abstract final class WebglCmd {
   static const texParameterf = 0x0307;
   static const texParameteri = 0x0308;
   static const generateMipmap = 0x0309;
+  // three.js r163+ uploads every image texture through texStorage2D +
+  // texSubImage2D(source) (spec 023)
+  static const texStorage2D = 0x030a;
+  static const texSubImage2DSource = 0x030b;
+  // three.js's WebGLState seeds empty 3D/array textures at renderer init
+  static const texImage3D = 0x030c;
+  static const texSubImage3D = 0x030d;
 
   // program
   static const shaderSource = 0x0401;
@@ -107,6 +117,7 @@ abstract final class WebglCmd {
   static const enableVertexAttribArray = 0x0501;
   static const disableVertexAttribArray = 0x0502;
   static const vertexAttribPointer = 0x0503;
+  static const vertexAttribDivisor = 0x050c;
   static const vertexAttrib1f = 0x0504;
   static const vertexAttrib2f = 0x0505;
   static const vertexAttrib3f = 0x0506;
@@ -146,6 +157,12 @@ abstract final class WebglCmd {
   static const framebufferTexture2D = 0x0701;
   static const framebufferRenderbuffer = 0x0702;
   static const renderbufferStorage = 0x0703;
+
+  // vertex arrays (WebGL 2; three.js's WebGLBindingStates wraps every draw
+  // in a VAO unconditionally, spec 023 — the 0x09xx family spec 021 reserved)
+  static const createVertexArray = 0x0901;
+  static const bindVertexArray = 0x0902;
+  static const deleteVertexArray = 0x0903;
 }
 
 /// texImage2D's 6-arg source form kinds. Pixels take the 9-arg form.
@@ -179,6 +196,8 @@ abstract class FjsGlBindings {
   void deleteShader(int id);
   void createTexture(int id);
   void deleteTexture(int id);
+  void createVertexArray(int id);
+  void deleteVertexArray(int id);
 
   // binding & state
   void activeTexture(int unit);
@@ -186,6 +205,7 @@ abstract class FjsGlBindings {
   void bindFramebuffer(int target, int id);
   void bindRenderbuffer(int target, int id);
   void bindTexture(int target, int id);
+  void bindVertexArray(int id);
   void blendColor(double r, double g, double b, double a);
   void blendEquation(int mode);
   void blendEquationSeparate(int modeRgb, int modeAlpha);
@@ -223,11 +243,25 @@ abstract class FjsGlBindings {
   void texImage2D(int target, int level, int internalformat, int width,
       int height, int border, int format, int type, Uint8List pixels);
   /// The 6-arg source form: [handle] names a decoded image in the host's
-  /// canvas image table (shared with 2d drawImage).
+  /// canvas image table (shared with 2d drawImage). [flipY] carries the
+  /// UNPACK_FLIP_Y_WEBGL pixel-store state the JS side recorded for this
+  /// upload — GL ES has no such pname, so the rows are flipped here.
   void texImage2DSource(int target, int level, int internalformat, int format,
-      int type, int handle);
+      int type, int handle, bool flipY);
   void texSubImage2D(int target, int level, int xoffset, int yoffset,
       int width, int height, int format, int type, Uint8List pixels);
+  /// texSubImage2D's 6-arg source form (three.js's texStorage2D + sub-upload
+  /// pair, spec 023). Dimensions come from the host's cached image.
+  void texSubImage2DSource(int target, int level, int xoffset, int yoffset,
+      int format, int type, int handle, bool flipY);
+  void texStorage2D(int target, int levels, int internalformat, int width,
+      int height);
+  void texImage3D(int target, int level, int internalformat, int width,
+      int height, int depth, int border, int format, int type,
+      Uint8List pixels);
+  void texSubImage3D(int target, int level, int xoffset, int yoffset,
+      int zoffset, int width, int height, int depth, int format, int type,
+      Uint8List pixels);
   void texParameterf(int target, int pname, double param);
   void texParameteri(int target, int pname, int param);
   void generateMipmap(int target);
@@ -247,6 +281,9 @@ abstract class FjsGlBindings {
   void disableVertexAttribArray(int index);
   void vertexAttribPointer(
       int index, int size, int type, bool normalized, int stride, int offset);
+  /// WebGL2 core — three.js calls it for every enabled attribute, instanced
+  /// or not (spec 023).
+  void vertexAttribDivisor(int index, int divisor);
   void vertexAttrib1f(int index, double x);
   void vertexAttrib2f(int index, double x, double y);
   void vertexAttrib3f(int index, double x, double y, double z);
@@ -344,6 +381,12 @@ class WebglChunkDecoder {
       final cmd = r.u16();
       if (cmd == WebglCmd.strDef) {
         r.readStrDef();
+        continue;
+      }
+      if (cmd == WebglCmd.strDef32) {
+        // same intern as readStrDef, u32 length — shader sources exceed
+        // 64 KiB and a truncated u16 desyncs the stream (spec 023)
+        r.readStrDef32();
         continue;
       }
       _dispatch(cmd, r);
@@ -493,12 +536,13 @@ class WebglChunkDecoder {
         final type = r.u32();
         final kind = r.u32();
         final handle = r.u32();
+        final flipY = r.u8() != 0;
         if (kind != TexSource.imageHandle) {
           throw CanvasOpException(
               'texImage2DSource: unknown source kind $kind');
         }
         return bindings.texImage2DSource(
-            target, level, internalformat, format, type, handle);
+            target, level, internalformat, format, type, handle, flipY);
       case WebglCmd.texSubImage2D:
         final target = r.u32();
         final level = r.i32();
@@ -511,6 +555,57 @@ class WebglChunkDecoder {
         final pixels = r.sub(r.u32());
         return bindings.texSubImage2D(target, level, xoffset, yoffset, width,
             height, format, type, pixels);
+      case WebglCmd.texStorage2D:
+        final target = r.u32();
+        final levels = r.i32();
+        final internalformat = r.i32();
+        final width = r.i32();
+        final height = r.i32();
+        return bindings.texStorage2D(
+            target, levels, internalformat, width, height);
+      case WebglCmd.texSubImage2DSource:
+        final target = r.u32();
+        final level = r.i32();
+        final xoffset = r.i32();
+        final yoffset = r.i32();
+        final format = r.u32();
+        final type = r.u32();
+        final kind = r.u32();
+        final handle = r.u32();
+        final flipY = r.u8() != 0;
+        if (kind != TexSource.imageHandle) {
+          throw CanvasOpException(
+              'texSubImage2DSource: unknown source kind $kind');
+        }
+        return bindings.texSubImage2DSource(target, level, xoffset, yoffset,
+            format, type, handle, flipY);
+      case WebglCmd.texImage3D:
+        final target = r.u32();
+        final level = r.i32();
+        final internalformat = r.i32();
+        final width = r.i32();
+        final height = r.i32();
+        final depth = r.i32();
+        final border = r.i32();
+        final format = r.u32();
+        final type = r.u32();
+        final pixels = r.sub(r.u32());
+        return bindings.texImage3D(target, level, internalformat, width,
+            height, depth, border, format, type, pixels);
+      case WebglCmd.texSubImage3D:
+        final target = r.u32();
+        final level = r.i32();
+        final xoffset = r.i32();
+        final yoffset = r.i32();
+        final zoffset = r.i32();
+        final width = r.i32();
+        final height = r.i32();
+        final depth = r.i32();
+        final format = r.u32();
+        final type = r.u32();
+        final pixels = r.sub(r.u32());
+        return bindings.texSubImage3D(target, level, xoffset, yoffset, zoffset,
+            width, height, depth, format, type, pixels);
       case WebglCmd.texParameterf:
         return bindings.texParameterf(r.u32(), r.u32(), r.f32());
       case WebglCmd.texParameteri:
@@ -549,6 +644,8 @@ class WebglChunkDecoder {
       case WebglCmd.vertexAttribPointer:
         return bindings.vertexAttribPointer(r.u32(), r.i32(), r.u32(),
             r.u8() != 0, r.i32(), r.i32());
+      case WebglCmd.vertexAttribDivisor:
+        return bindings.vertexAttribDivisor(r.u32(), r.u32());
       case WebglCmd.vertexAttrib1f:
         return bindings.vertexAttrib1f(r.u32(), r.f32());
       case WebglCmd.vertexAttrib2f:
@@ -631,6 +728,13 @@ class WebglChunkDecoder {
         return bindings.renderbufferStorage(
             r.u32(), r.u32(), r.i32(), r.i32());
 
+      case WebglCmd.createVertexArray:
+        return bindings.createVertexArray(r.u32());
+      case WebglCmd.bindVertexArray:
+        return bindings.bindVertexArray(r.u32());
+      case WebglCmd.deleteVertexArray:
+        return bindings.deleteVertexArray(r.u32());
+
       default:
         throw CanvasOpException('unknown webgl command 0x'
             '${cmd.toRadixString(16)} at offset ${r.offset - 2}');
@@ -676,6 +780,7 @@ class FjsAngleBindings extends FjsGlBindings {
   final Map<int, Renderbuffer> renderbuffers = {};
   final Map<int, WebGLShader> shaders = {};
   final Map<int, WebGLTexture> textures = {};
+  final Map<int, VertexArrayObject> vertexArrays = {};
 
   /// Resolved real locations, by handle. Filled on first use of the handle
   /// in an executing command — at that point the shader is compiled and
@@ -709,6 +814,9 @@ class FjsAngleBindings extends FjsGlBindings {
   }
 
   WebGLTexture _texture(int id) => textures.putIfAbsent(id, gl.createTexture);
+
+  VertexArrayObject _vao(int id) =>
+      vertexArrays.putIfAbsent(id, gl.createVertexArray);
 
   /// The plugin's uniform calls demand non-null UniformLocation objects;
   /// resolve the handle's real location, or null when GL says the name does
@@ -796,6 +904,14 @@ class FjsAngleBindings extends FjsGlBindings {
     if (t != null) gl.deleteTexture(t);
   }
 
+  @override
+  void createVertexArray(int id) => _vao(id);
+  @override
+  void deleteVertexArray(int id) {
+    final v = vertexArrays.remove(id);
+    if (v != null) gl.deleteVertexArray(v);
+  }
+
   // -- binding & state
   @override
   void activeTexture(int unit) => gl.activeTexture(unit);
@@ -811,6 +927,12 @@ class FjsAngleBindings extends FjsGlBindings {
   @override
   void bindTexture(int target, int id) =>
       gl.bindTexture(target, id == 0 ? null : _texture(id));
+  @override
+  void bindVertexArray(int id) {
+    // 0 = the DOM's null object: unbind to the default VAO. The wrapper
+    // dereferences .id, so the sentinel is a zero-id object, not Dart null.
+    gl.bindVertexArray(id == 0 ? VertexArrayObject(0) : _vao(id));
+  }
   @override
   void blendColor(double r, double g, double b, double a) =>
       _unsupported('blendColor');
@@ -852,7 +974,19 @@ class FjsAngleBindings extends FjsGlBindings {
   @override
   void lineWidth(double width) => gl.lineWidth(width);
   @override
-  void pixelStorei(int pname, int param) => gl.pixelStorei(pname, param);
+  void pixelStorei(int pname, int param) {
+    // GLES rejects the WebGL-only unpack pnames with INVALID_ENUM (seen as
+    // per-upload error spam on Android, spec 023): FLIP_Y rides on
+    // TexImage2DSource's flag instead, PREMULTIPLY/COLORSPACE are absorbed
+    // — glTF materials are non-premultiplied, so absorbing them is
+    // semantically correct for this format.
+    if (pname == WebGL.UNPACK_FLIP_Y_WEBGL ||
+        pname == WebGL.UNPACK_PREMULTIPLY_ALPHA_WEBGL ||
+        pname == WebGL.UNPACK_COLORSPACE_CONVERSION_WEBGL) {
+      return;
+    }
+    gl.pixelStorei(pname, param);
+  }
   @override
   void polygonOffset(double factor, double units) =>
       gl.polygonOffset(factor, units);
@@ -879,6 +1013,13 @@ class FjsAngleBindings extends FjsGlBindings {
   @override
   void stencilOpSeparate(int face, int fail, int zfail, int zpass) =>
       _unsupported('stencilOpSeparate');
+  // NOTE (spec 023, Android): the platform presents the GL framebuffer
+  // bottom-up here (SurfaceTexture keeps GL's origin) while the browser and
+  // the iOS IOSurface texture present top-down. A negative-height viewport
+  // would mirror the output but Android GL rejects it with INVALID_VALUE,
+  // so pages flip the projection instead — see gltf-viewer.vue's
+  // use of fjs.platform.
+
   @override
   void viewport(int x, int y, int width, int height) =>
       gl.viewport(x, y, width, height);
@@ -913,7 +1054,7 @@ class FjsAngleBindings extends FjsGlBindings {
 
   @override
   void texImage2DSource(int target, int level, int internalformat,
-      int format, int type, int handle) {
+      int format, int type, int handle, bool flipY) {
     // the raw bytes were cached when the host decoded the image, so the
     // upload stays synchronous with the stream: a draw following the
     // texImage2D in the same chunk sees the pixels
@@ -923,8 +1064,62 @@ class FjsAngleBindings extends FjsGlBindings {
           'yet; skipped.');
       return;
     }
+    final bytes = flipY
+        ? _flipRows(cached.bytes, cached.width, cached.height)
+        : cached.bytes;
     gl.texImage2D(target, level, internalformat, cached.width, cached.height,
-        0, format, type, cached.bytes);
+        0, format, type, bytes);
+  }
+
+  /// WebGL's UNPACK_FLIP_Y_WEBGL, done by hand: the browser flips inside
+  /// texImage2D, GLES has no pname for it. Top-bottom row swap of tightly
+  /// packed RGBA; the cache keeps its original order because the 2d
+  /// drawImage path (top-left origin) reads it unflipped.
+  static Uint8List _flipRows(Uint8List rgba, int width, int height) {
+    final row = width * 4;
+    final out = Uint8List(rgba.length);
+    for (var y = 0; y < height; y++) {
+      out.setRange(y * row, y * row + row, rgba, (height - 1 - y) * row);
+    }
+    return out;
+  }
+
+  @override
+  void texSubImage2DSource(int target, int level, int xoffset, int yoffset,
+      int format, int type, int handle, bool flipY) {
+    final cached = FjsCanvasImages.instance.rgba(handle);
+    if (cached == null) {
+      debugPrint('[fjs] texSubImage2D: image handle $handle has no pixels '
+          'yet; skipped.');
+      return;
+    }
+    final bytes = flipY
+        ? _flipRows(cached.bytes, cached.width, cached.height)
+        : cached.bytes;
+    gl.texSubImage2D(target, level, xoffset, yoffset, cached.width,
+        cached.height, format, type, bytes);
+  }
+
+  @override
+  void texStorage2D(int target, int levels, int internalformat, int width,
+      int height) {
+    gl.texStorage2D(target, levels, internalformat, width, height);
+  }
+
+  @override
+  void texImage3D(int target, int level, int internalformat, int width,
+      int height, int depth, int border, int format, int type,
+      Uint8List pixels) {
+    gl.texImage3D(target, level, internalformat, width, height, depth, border,
+        format, type, pixels);
+  }
+
+  @override
+  void texSubImage3D(int target, int level, int xoffset, int yoffset,
+      int zoffset, int width, int height, int depth, int format, int type,
+      Uint8List pixels) {
+    gl.texSubImage3D(target, level, xoffset, yoffset, zoffset, width, height,
+        depth, format, type, pixels);
   }
 
   @override
@@ -978,6 +1173,10 @@ class FjsAngleBindings extends FjsGlBindings {
     gl.vertexAttribPointer(
         _attrib(index), size, type, normalized, stride, offset);
   }
+
+  @override
+  void vertexAttribDivisor(int index, int divisor) =>
+      gl.vertexAttribDivisor(_attrib(index), divisor);
 
   @override
   void vertexAttrib1f(int index, double x) =>
@@ -1128,25 +1327,71 @@ class FjsAngleBindings extends FjsGlBindings {
     }
   }
 
+  /// Read-only diagnostics: a lookup that cannot be answered (unknown
+  /// handle, plugin stub) answers null, which the JS side turns into the
+  /// DOM's empty string. It must never throw — the DOM's queries don't, and
+  /// a throw here kills the whole render loop over a diagnostic.
   @override
-  String? getShaderInfoLog(int shader) =>
-      gl.getShaderInfoLog(_shader(shader));
+  String? getShaderInfoLog(int shader) {
+    try {
+      return gl.getShaderInfoLog(_shader(shader));
+    } catch (_) {
+      return null;
+    }
+  }
+
   @override
-  String? getProgramInfoLog(int program) =>
-      gl.getProgramInfoLog(_program(program));
+  String? getProgramInfoLog(int program) {
+    try {
+      return gl.getProgramInfoLog(_program(program));
+    } catch (_) {
+      return null;
+    }
+  }
+
   @override
-  String? getShaderSource(int shader) => gl.getShaderSource(shader);
+  String? getShaderSource(int shader) {
+    try {
+      // the plugin's getShaderSource takes the raw int id, not the wrapper
+      return gl.getShaderSource(_shader(shader).id);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Diagnostics whose failure three.js cannot survive: a null here crosses
+  /// the ABI as undefined and blows up its uniform traversal. A failure is
+  /// logged once (the real cause needs to be visible on a device log,
+  /// constitution V) and answered with a dead entry instead — an empty-named
+  /// uniform resolves to no location and three.js skips its upload.
+  static bool _activeInfoFailureLogged = false;
+
+  FjsActiveInfo _deadActiveInfo(Object error) {
+    if (!_activeInfoFailureLogged) {
+      _activeInfoFailureLogged = true;
+      debugPrint('[fjs] fjs.webgl active-info queries failing: $error');
+    }
+    return const FjsActiveInfo('', 0, 0);
+  }
 
   @override
   FjsActiveInfo? getActiveAttrib(int program, int index) {
-    final info = gl.getActiveAttrib(_program(program), index);
-    return FjsActiveInfo(info.name, info.size, info.type);
+    try {
+      final info = gl.getActiveAttrib(_program(program), index);
+      return FjsActiveInfo(info.name, info.size, info.type);
+    } catch (e) {
+      return _deadActiveInfo(e);
+    }
   }
 
   @override
   FjsActiveInfo? getActiveUniform(int program, int index) {
-    final info = gl.getActiveUniform(_program(program), index);
-    return FjsActiveInfo(info.name, info.size, info.type);
+    try {
+      final info = gl.getActiveUniform(_program(program), index);
+      return FjsActiveInfo(info.name, info.size, info.type);
+    } catch (e) {
+      return _deadActiveInfo(e);
+    }
   }
 
   @override
@@ -1389,6 +1634,39 @@ class FjsWebglRuntime {
               '"desynchronized":false,"failIfMajorPerformanceCaveat":false,'
               '"powerPreference":"default","premultipliedAlpha":true,'
               '"preserveDrawingBuffer":false,"stencil":false}';
+        case 'getParameter':
+          // three.js reads this batch during renderer construction, before
+          // the GL surface exists; null poisons its texture-unit and size
+          // bookkeeping permanently (spec 023 Android: "supports only null",
+          // then every texSubImage2D fails). Values are the GLES3 minimums a
+          // conforming device will meet — three caches them, the real query
+          // answers replace them once the surface pumps.
+          switch (arg(0)) {
+            case 0x0d33: // MAX_TEXTURE_SIZE
+              return 4096;
+            case 0x851c: // MAX_CUBE_MAP_TEXTURE_SIZE
+              return 4096;
+            case 0x8872: // MAX_TEXTURE_IMAGE_UNITS
+              return 16;
+            case 0x8b4c: // MAX_VERTEX_TEXTURE_IMAGE_UNITS
+              return 16;
+            case 0x8b4d: // MAX_COMBINED_TEXTURE_IMAGE_UNITS
+              return 16;
+            case 0x8869: // MAX_VERTEX_ATTRIBS
+              return 16;
+            case 0x8dfb: // MAX_VERTEX_UNIFORM_VECTORS
+              return 256;
+            case 0x8dfc: // MAX_VARYING_VECTORS
+              return 16;
+            case 0x8dfd: // MAX_FRAGMENT_UNIFORM_VECTORS
+              return 64;
+            case 0x8a2e: // MAX_UNIFORM_BUFFER_BINDINGS
+              return 36;
+            case 0x8d57: // MAX_SAMPLES
+              return 4;
+            default:
+              return null;
+          }
         default:
           return null;
       }

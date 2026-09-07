@@ -19,7 +19,13 @@ export { loadCanvasImage, FjsCanvasImage } from './canvas/image';
 // need, and the surface/target shapes its factory receives. WebGL's own
 // implementation lives in @ufjs/webgl (spec 022).
 export { ByteBuf } from './canvas/display-list';
-export { utf8Encode } from './ui/utf8';
+// utf8Decode is exported for polyfills that must offer the DOM's TextDecoder
+// on the native host (three.js's GLTFLoader path, spec 023) — the runtime's
+// own decoding never goes through a class-shaped global.
+export { utf8Encode, utf8Decode, utf8DecodeBytes } from './ui/utf8';
+// base64Encode feeds polyfills that hand the host's image loader in-memory
+// bytes as a data: URL (three.js's createImageBitmap path, spec 023).
+export { base64Encode } from './net/base64';
 export { flushNow, getWriter } from './host';
 export type { OpWriter } from './ui/ops';
 export type { CanvasSurface } from './canvas/context-2d';

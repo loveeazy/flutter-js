@@ -16,6 +16,8 @@
 //   `mode` is set. Pages written before mode existed keep their behavior,
 //   at the cost of one prop that has two spellings — see
 //   render/image_mode.dart.
+import 'dart:convert';
+
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 
@@ -60,6 +62,10 @@ const String fjsPublicAssetRoot = 'assets/fjs/public';
 /// * `/x`, `asset://x`  local. With a `fjs dev` connection the dev server
 ///                      serves it, so editing a PNG shows up on the next
 ///                      reload; without one it is a Flutter asset.
+/// * `data:…;base64,…`  in-memory bytes (spec 023): the web build decodes
+///                      these natively, and libraries that hand a canvas an
+///                      inline image (three.js's createImageBitmap path)
+///                      have no other way to cross the boundary.
 ///
 /// The dev/release fork lives here rather than in JS because "is this
 /// process attached to a dev server" is Dart-side runtime state that the
@@ -81,6 +87,21 @@ ImageProvider<Object>? fjsResolveImageSource(
   if (src.isEmpty) return null;
   if (src.startsWith('http://') || src.startsWith('https://')) {
     return CachedNetworkImageProvider(src);
+  }
+  if (src.startsWith('data:')) {
+    final comma = src.indexOf(',');
+    final header = comma < 0 ? '' : src.substring(0, comma);
+    if (!header.contains(';base64')) {
+      warn?.call(
+        '<image src="data:…">: only base64 data URLs are decodable on the '
+        'Flutter side; percent-encoded ones raise @error.',
+      );
+      return null;
+    }
+    final payload = comma < 0 ? '' : src.substring(comma + 1);
+    final bytes = base64Decode(payload);
+    if (bytes.isEmpty) return null;
+    return MemoryImage(bytes);
   }
   var path = src;
   if (path.startsWith('asset://')) path = path.substring('asset://'.length);

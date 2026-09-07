@@ -21,6 +21,13 @@ import { ByteBuf, utf8Encode } from '@ufjs/runtime';
 export const enum WebglCmd {
   /** u16 id, u16 len, utf8 — per-chunk string intern, same shape as 2d. */
   StrDef = 0x0001,
+  /** u16 id, u32 len, utf8. Same intern, longer strings: three.js's built-in
+   * PBR + skinning shader source crosses 64 KiB, and a silently truncated
+   * u16 length desyncs the whole stream from that point on (spec 023, iOS).
+   * The webgl family switched to this form; the 2d display list keeps its
+   * own shorter-string encoding, so the two share the id space's low slot
+   * but not the field widths. */
+  StrDef32 = 0x0002,
 
   // -- resources 0x01xx --------------------------------------------------
   CreateBuffer = 0x0101,
@@ -82,6 +89,13 @@ export const enum WebglCmd {
   TexParameterf = 0x0307,
   TexParameteri = 0x0308,
   GenerateMipmap = 0x0309,
+  // three.js r163+ dropped WebGL 1: every image texture uploads through
+  // texStorage2D + texSubImage2D(source) (spec 023)
+  TexStorage2D = 0x030a,
+  TexSubImage2DSource = 0x030b,
+  // three.js's WebGLState also seeds empty 3D/array textures at init
+  TexImage3D = 0x030c,
+  TexSubImage3D = 0x030d,
 
   // -- program 0x04xx ----------------------------------------------------
   ShaderSource = 0x0401,
@@ -97,6 +111,9 @@ export const enum WebglCmd {
   EnableVertexAttribArray = 0x0501,
   DisableVertexAttribArray = 0x0502,
   VertexAttribPointer = 0x0503,
+  /** WebGL2 core: three.js's WebGLBindingStates calls it for EVERY enabled
+   * attribute (divisor 1 for plain ones), not just instanced draws. */
+  VertexAttribDivisor = 0x050c,
   VertexAttrib1f = 0x0504,
   VertexAttrib2f = 0x0505,
   VertexAttrib3f = 0x0506,
@@ -136,6 +153,13 @@ export const enum WebglCmd {
   FramebufferTexture2D = 0x0701,
   FramebufferRenderbuffer = 0x0702,
   RenderbufferStorage = 0x0703,
+
+  // -- vertex arrays 0x09xx ----------------------------------------------
+  // WebGL 2's VAOs, added for three.js (spec 023): its WebGLBindingStates
+  // wraps every draw in a VAO, unconditionally, when the context is WebGL2.
+  CreateVertexArray = 0x0901,
+  BindVertexArray = 0x0902,
+  DeleteVertexArray = 0x0903,
 }
 
 /** texImage2D's source kinds for TexImage2DSource. Pixels (TypedArray /
@@ -157,16 +181,17 @@ export class WebglChunkWriter {
 
   constructor(private readonly onDirty: () => void) {}
 
-  /** Interns a string in the current chunk, emitting its definition once. */
+  /** Interns a string in the current chunk, emitting its definition once.
+   * u32 length: shader sources exceed the 64 KiB a u16 can express. */
   str(value: string): number {
     const known = this.strings.get(value);
     if (known !== undefined) return known;
     const id = this.nextStringId++;
     this.strings.set(value, id);
     const encoded = utf8Encode(value);
-    this.buf.u16(WebglCmd.StrDef);
+    this.buf.u16(WebglCmd.StrDef32);
     this.buf.u16(id);
-    this.buf.u16(encoded.length);
+    this.buf.u32(encoded.length);
     this.buf.bytes(encoded);
     return id;
   }
@@ -228,6 +253,18 @@ export class WebglChunkWriter {
 
   deleteTexture(id: number): void {
     this.cmd(WebglCmd.DeleteTexture).u32(id);
+  }
+
+  createVertexArray(id: number): void {
+    this.cmd(WebglCmd.CreateVertexArray).u32(id);
+  }
+
+  bindVertexArray(id: number): void {
+    this.cmd(WebglCmd.BindVertexArray).u32(id);
+  }
+
+  deleteVertexArray(id: number): void {
+    this.cmd(WebglCmd.DeleteVertexArray).u32(id);
   }
 
   activeTexture(unit: number): void {
@@ -452,7 +489,15 @@ export class WebglChunkWriter {
   }
 
   /** texImage2D's 6-arg source form. Only FjsCanvasImage sources cross here:
-   * the pixels stay on the host, named by handle. */
+   * the pixels stay on the host, named by handle.
+   *
+   * flipY carries the one GL state this module tracks client-side:
+   * `pixelStorei(UNPACK_FLIP_Y_WEBGL, …)`. three.js sets it before every
+   * image-texture upload and the decoder has no state machine to remember
+   * it, so the flag rides along with the command. Web browsers implement
+   * the flip inside texImage2D; ANGLE was observed not to honor the pname on
+   * the raw-pixel upload path, so the Dart side flips the cached RGBA rows
+   * itself when this is 1. */
   texImage2DSource(
     target: number,
     level: number,
@@ -460,6 +505,7 @@ export class WebglChunkWriter {
     format: number,
     type: number,
     handle: number,
+    flipY = false,
   ): void {
     this.cmd(WebglCmd.TexImage2DSource)
       .u32(target)
@@ -468,7 +514,8 @@ export class WebglChunkWriter {
       .u32(format)
       .u32(type)
       .u32(TexSource.ImageHandle)
-      .u32(handle);
+      .u32(handle)
+      .u8(flipY ? 1 : 0);
   }
 
   texSubImage2D(
@@ -495,8 +542,104 @@ export class WebglChunkWriter {
       .bytes(pixels);
   }
 
+  texStorage2D(
+    target: number,
+    levels: number,
+    internalformat: number,
+    width: number,
+    height: number,
+  ): void {
+    this.cmd(WebglCmd.TexStorage2D)
+      .u32(target)
+      .i32(levels)
+      .i32(internalformat)
+      .i32(width)
+      .i32(height);
+  }
+
+  /** texSubImage2D's 6-arg source form, told apart from the 9-arg pixel form
+   * by arity — the same DOM shape three.js reaches after texStorage2D. The
+   * pixel dimensions come from the host's cached image, not the wire. */
+  texSubImage2DSource(
+    target: number,
+    level: number,
+    xoffset: number,
+    yoffset: number,
+    format: number,
+    type: number,
+    handle: number,
+    flipY = false,
+  ): void {
+    this.cmd(WebglCmd.TexSubImage2DSource)
+      .u32(target)
+      .i32(level)
+      .i32(xoffset)
+      .i32(yoffset)
+      .u32(format)
+      .u32(type)
+      .u32(TexSource.ImageHandle)
+      .u32(handle)
+      .u8(flipY ? 1 : 0);
+  }
+
   texParameterf(target: number, pname: number, param: number): void {
     this.cmd(WebglCmd.TexParameterf).u32(target).u32(pname).f32(param);
+  }
+
+  /** texImage3D's pixel form — 3D/array textures only ever carry TypedArray
+   * pixels in this runtime (an image handle has no depth). */
+  texImage3D(
+    target: number,
+    level: number,
+    internalformat: number,
+    width: number,
+    height: number,
+    depth: number,
+    border: number,
+    format: number,
+    type: number,
+    pixels: Uint8Array,
+  ): void {
+    this.cmd(WebglCmd.TexImage3D)
+      .u32(target)
+      .i32(level)
+      .i32(internalformat)
+      .i32(width)
+      .i32(height)
+      .i32(depth)
+      .i32(border)
+      .u32(format)
+      .u32(type)
+      .u32(pixels.length)
+      .bytes(pixels);
+  }
+
+  texSubImage3D(
+    target: number,
+    level: number,
+    xoffset: number,
+    yoffset: number,
+    zoffset: number,
+    width: number,
+    height: number,
+    depth: number,
+    format: number,
+    type: number,
+    pixels: Uint8Array,
+  ): void {
+    this.cmd(WebglCmd.TexSubImage3D)
+      .u32(target)
+      .i32(level)
+      .i32(xoffset)
+      .i32(yoffset)
+      .i32(zoffset)
+      .i32(width)
+      .i32(height)
+      .i32(depth)
+      .u32(format)
+      .u32(type)
+      .u32(pixels.length)
+      .bytes(pixels);
   }
 
   texParameteri(target: number, pname: number, param: number): void {
@@ -562,6 +705,10 @@ export class WebglChunkWriter {
       .u8(normalized ? 1 : 0)
       .i32(stride)
       .i32(offset);
+  }
+
+  vertexAttribDivisor(index: number, divisor: number): void {
+    this.cmd(WebglCmd.VertexAttribDivisor).u32(index).u32(divisor);
   }
 
   vertexAttrib1f(index: number, x: number): void {

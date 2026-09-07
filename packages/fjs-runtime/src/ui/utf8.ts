@@ -51,10 +51,19 @@ export function utf8Encode(input: string): Uint8Array {
 // UTF-8 decode without TextDecoder (same reason as above). Malformed
 // sequences decode to U+FFFD rather than throwing — a truncated response
 // body should still be readable text, not an exception.
+//
+// utf8DecodeBytes is the loop WITHOUT the TextDecoder probe; utf8Decode
+// wraps it. The split exists because a polyfilled TextDecoder (three.js's
+// GLTFLoader path, spec 023) would otherwise recurse into itself forever —
+// the probe sees the polyfill, the polyfill calls back. Code that runs
+// inside a TextDecoder implementation must call utf8DecodeBytes directly.
 export function utf8Decode(bytes: Uint8Array): string {
   const dec = typeof TextDecoder !== 'undefined' ? new TextDecoder() : null;
   if (dec) return dec.decode(bytes);
+  return utf8DecodeBytes(bytes);
+}
 
+export function utf8DecodeBytes(bytes: Uint8Array): string {
   // Chunked so String.fromCharCode never sees a huge argument list.
   const parts: string[] = [];
   let chunk: number[] = [];

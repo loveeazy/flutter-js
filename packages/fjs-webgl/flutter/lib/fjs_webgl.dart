@@ -72,7 +72,17 @@ class FjsWebgl {
       engine.host.register('fjs.webgl.$method', (args) {
         if (args.isEmpty) return null;
         final nodeId = (args.first as num?)?.toInt() ?? 0;
-        return FjsWebglRuntime.instance.query(nodeId, method, args.sublist(1));
+        try {
+          return FjsWebglRuntime.instance.query(
+              nodeId, method, args.sublist(1));
+        } catch (e, st) {
+          // The JS side only sees "host module call failed", which says
+          // nothing about WHERE on the Dart side it broke — print the real
+          // exception so a device log can be diagnosed at all (constitution
+          // V), then rethrow so the failure stays a failure.
+          debugPrint('[fjs] fjs.webgl.$method threw: $e\n$st');
+          rethrow;
+        }
       });
     }
     canvasDisplayOverride = _displayOverride;

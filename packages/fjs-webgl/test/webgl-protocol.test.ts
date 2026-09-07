@@ -5,12 +5,21 @@
 // the fjs_webgl Dart package's webgl_replay.dart — with nothing generating
 // one from the other. These assertions pin the encoding so a change on this
 // side that forgets the other one fails here rather than on a device.
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+// The context's sync queries go over invokeHost; tests here run hostless, so
+// the ABI answers null — exactly the shape flutter_angle's "no log written"
+// produces, which is the case the info-log test below pins.
+const { invokeHostMock } = vi.hoisted(() => ({ invokeHostMock: vi.fn(() => null) }));
+vi.mock('@ufjs/runtime', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@ufjs/runtime')>();
+  return { ...actual, invokeHost: invokeHostMock };
+});
 
 import { WebglChunkWriter, WebglCmd, TexSource } from '../src/protocol';
 import { FjsWebGLObject, FjsWebGLRenderingContext, GL } from '../src/context';
 import { registerWebgl } from '../index';
-import { registerContextType, resolveContext } from '@ufjs/runtime';
+import { registerContextType, resolveContext, FjsCanvasImage } from '@ufjs/runtime';
 
 /** A minimal reader for the handful of command shapes these tests pin. Not
  * the decoder's twin — webgl_replay.dart is — just enough to catch an
@@ -61,6 +70,14 @@ function decode(
       p += len;
       continue;
     }
+    if (cmd === WebglCmd.StrDef32) {
+      const id = view.getUint16(p, true);
+      const len = view.getUint32(p + 2, true);
+      p += 6;
+      strings.set(id, new TextDecoder().decode(bytes.subarray(p, p + len)));
+      p += len;
+      continue;
+    }
     const args: number[] = [];
     let str: string | undefined;
     switch (cmd) {
@@ -69,10 +86,16 @@ function decode(
         break;
       case WebglCmd.CreateBuffer:
       case WebglCmd.CreateTexture:
+      case WebglCmd.CreateVertexArray:
+      case WebglCmd.BindVertexArray:
+      case WebglCmd.DeleteVertexArray:
         args.push(eat.u32());
         break;
       case WebglCmd.BindBuffer:
         args.push(eat.u32(), eat.u32());
+        break;
+      case WebglCmd.PixelStorei:
+        args.push(eat.u32(), eat.i32());
         break;
       case WebglCmd.ClearColor:
         args.push(eat.f32(), eat.f32(), eat.f32(), eat.f32());
@@ -93,8 +116,37 @@ function decode(
       case WebglCmd.TexImage2DSource:
         args.push(
           eat.u32(), eat.i32(), eat.i32(), eat.u32(), eat.u32(),
-          eat.u32(), eat.u32(),
+          eat.u32(), eat.u32(), eat.u8(),
         );
+        break;
+      case WebglCmd.TexSubImage2DSource:
+        args.push(
+          eat.u32(), eat.i32(), eat.i32(), eat.i32(), eat.u32(),
+          eat.u32(), eat.u32(), eat.u32(), eat.u8(),
+        );
+        break;
+      case WebglCmd.TexStorage2D:
+        args.push(eat.u32(), eat.i32(), eat.i32(), eat.i32(), eat.i32());
+        break;
+      case WebglCmd.TexImage3D: {
+        const target = eat.u32();
+        const level = eat.i32();
+        const internalformat = eat.i32();
+        const w = eat.i32();
+        const h = eat.i32();
+        const d = eat.i32();
+        const border = eat.i32();
+        const format = eat.u32();
+        const type = eat.u32();
+        const len = eat.u32();
+        p += len; // payload shape pinned by the Dart side's decoder test
+        args.push(target, level, internalformat, w, h, d, border, format, type, len);
+        break;
+      }
+      case WebglCmd.DeleteBuffer:
+      case WebglCmd.DeleteTexture:
+      case WebglCmd.DeleteVertexArray:
+        args.push(eat.u32());
         break;
       case WebglCmd.ShaderSource: {
         const shader = eat.u32();
@@ -121,6 +173,9 @@ function decode(
       }
       case WebglCmd.DrawArrays:
         args.push(eat.u32(), eat.i32(), eat.u32());
+        break;
+      case WebglCmd.VertexAttribDivisor:
+        args.push(eat.u32(), eat.u32());
         break;
       case WebglCmd.Clear:
         args.push(eat.u32());
@@ -220,10 +275,47 @@ describe('WebglChunkWriter encoding', () => {
       GL.TEXTURE_2D, 0, GL.RGBA, GL.RGBA, GL.UNSIGNED_BYTE, 42,
     );
     const ops = decode(s.take()[0]);
+    // the trailing 0 is the flipY flag (spec 023) — always present on the wire
     expect(ops[0].args).toEqual([
       GL.TEXTURE_2D, 0, GL.RGBA, GL.RGBA, GL.UNSIGNED_BYTE,
-      TexSource.ImageHandle, 42,
+      TexSource.ImageHandle, 42, 0,
     ]);
+  });
+
+  it('encodes vertex-array create/bind/delete (spec 023)', () => {
+    const s = makeSurface();
+    const w = s.webglWriter();
+    w.createVertexArray(9);
+    w.bindVertexArray(9);
+    w.bindVertexArray(0);
+    w.deleteVertexArray(9);
+    const ops = decode(s.take()[0]);
+    expect(ops.map((o) => [o.cmd, o.args])).toEqual([
+      [WebglCmd.CreateVertexArray, [9]],
+      [WebglCmd.BindVertexArray, [9]],
+      [WebglCmd.BindVertexArray, [0]],
+      [WebglCmd.DeleteVertexArray, [9]],
+    ]);
+  });
+
+  it('shaderSource strings longer than 64 KiB use StrDef32 with u32 len', () => {
+    // three.js's built-in PBR + skinning shader is ~70 KB once assembled;
+    // a u16 length silently truncates and desyncs the stream (spec 023 iOS)
+    const s = makeSurface();
+    const big = 'void main() { //' + 'x'.repeat(70_000) + '}';
+    const strId = s.webglWriter().str(big);
+    s.webglWriter().shaderSource(5, strId);
+    const chunk = s.take()[0];
+    // StrDef32 = 0x0002, little-endian u16
+    expect(chunk[0]).toBe(0x02);
+    expect(chunk[1]).toBe(0x00);
+    // str id, then u32 length just past it
+    const view = new DataView(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+    expect(view.getUint16(2, true)).toBe(strId);
+    expect(view.getUint32(4, true)).toBeGreaterThan(64 * 1024);
+    const ops = decode(chunk);
+    expect(ops[0].cmd).toBe(WebglCmd.ShaderSource);
+    expect(ops[0].str).toBe(big);
   });
 
   it('encodes a mat4 uniform with transpose flag and 16 floats', () => {
@@ -236,6 +328,14 @@ describe('WebglChunkWriter encoding', () => {
     expect(ops[0].args[1]).toBe(0); // transpose=false
     expect(ops[0].args[2]).toBe(16);
     expect(ops[0].args.slice(3)).toEqual(m);
+  });
+
+  it('vertexAttribDivisor round-trips (WebGL2 core, three calls it always)', () => {
+    const s = makeSurface();
+    s.webglWriter().vertexAttribDivisor(2, 0);
+    const ops = decode(s.take()[0]);
+    expect(ops[0].cmd).toBe(WebglCmd.VertexAttribDivisor);
+    expect(ops[0].args).toEqual([2, 0]);
   });
 
   it('uniform2fv sends element count, arity implied by the command id', () => {
@@ -282,6 +382,143 @@ describe('FjsWebGLRenderingContext', () => {
     const gl = new FjsWebGLRenderingContext(s as never, 7);
     expect(gl.createShader(GL.TRIANGLES)).toBeNull();
     expect(gl.createShader(GL.VERTEX_SHADER)).not.toBeNull();
+  });
+
+  it('getActiveUniform unpacks the Dart side\'s JSON answer', () => {
+    // the Dart query answers '{"name":..,"size":..,"type":..}' (v1 ABI only
+    // carries scalars); handing three.js the raw string blew up parseUniform,
+    // which reads .name (spec 023 iOS)
+    invokeHostMock.mockReturnValueOnce(
+      '{"name":"u_projectionMatrix","size":1,"type":35676}' as never,
+    );
+    const s = makeSurface();
+    const gl = new FjsWebGLRenderingContext(s as never, 7);
+    const program = gl.createProgram();
+    const info = gl.getActiveUniform(program!, 0);
+    expect(info).toEqual({ name: 'u_projectionMatrix', size: 1, type: 35676 });
+    invokeHostMock.mockReturnValueOnce(null);
+    expect(gl.getActiveAttrib(program!, 0)).toBeNull();
+  });
+
+  it('info-log queries return strings, never null (three trims them)', () => {
+    // WebGLState's onFirstUse does gl.getProgramInfoLog(program).trim() —
+    // a null from flutter_angle's "no log written" blew up every frame
+    const s = makeSurface();
+    const gl = new FjsWebGLRenderingContext(s as never, 7);
+    const prog = gl.createProgram();
+    const sh = gl.createShader(GL.VERTEX_SHADER);
+    expect(gl.getProgramInfoLog(prog!)).toBe('');
+    expect(gl.getShaderInfoLog(sh!)).toBe('');
+    expect(gl.getShaderSource(sh!)).toBe('');
+  });
+
+  it('createVertexArray allocates its own kind and binds id 0 unbound', () => {
+    const s = makeSurface();
+    const gl = new FjsWebGLRenderingContext(s as never, 7);
+    const vao = gl.createVertexArray();
+    expect(vao!.kind).toBe('WebGLVertexArrayObject');
+    gl.bindVertexArray(vao);
+    gl.bindVertexArray(null);
+    gl.deleteVertexArray(vao);
+    const ops = decode(s.take()[0]);
+    expect(ops.map((o) => [o.cmd, o.args])).toEqual([
+      [WebglCmd.CreateVertexArray, [vao!.id]],
+      [WebglCmd.BindVertexArray, [vao!.id]],
+      [WebglCmd.BindVertexArray, [0]],
+      [WebglCmd.DeleteVertexArray, [vao!.id]],
+    ]);
+  });
+
+  it('pixelStorei(UNPACK_FLIP_Y_WEBGL) rides along on texImage2DSource', () => {
+    const s = makeSurface();
+    const gl = new FjsWebGLRenderingContext(s as never, 7);
+    // the 6-arg form requires a real FjsCanvasImage (instanceof check);
+    // constructing one without setting `src` stays host-free
+    const image = new FjsCanvasImage();
+    gl.pixelStorei(GL.UNPACK_FLIP_Y_WEBGL, 1);
+    gl.texImage2D(GL.TEXTURE_2D, 0, GL.RGBA, GL.RGBA, GL.UNSIGNED_BYTE, image);
+    gl.pixelStorei(GL.UNPACK_FLIP_Y_WEBGL, 0);
+    gl.texImage2D(GL.TEXTURE_2D, 0, GL.RGBA, GL.RGBA, GL.UNSIGNED_BYTE, image);
+    const ops = decode(s.take()[0]).filter(
+      (o) => o.cmd === WebglCmd.TexImage2DSource,
+    );
+    expect(ops).toHaveLength(2);
+    expect(ops[0].args[6]).toBe(image.handle);
+    expect(ops[0].args[7]).toBe(1);
+    expect(ops[1].args[7]).toBe(0);
+  });
+
+  it('texSubImage2D 6-arg source form routes to TexSubImage2DSource', () => {
+    // three.js's WebGL2 upload pair: texStorage2D then texSubImage2D(source)
+    const s = makeSurface();
+    const gl = new FjsWebGLRenderingContext(s as never, 7);
+    const image = new FjsCanvasImage();
+    gl.texStorage2D(GL.TEXTURE_2D, 1, GL.RGBA8, image.width, image.height);
+    gl.pixelStorei(GL.UNPACK_FLIP_Y_WEBGL, 1);
+    gl.texSubImage2D(
+      GL.TEXTURE_2D, 0, 0, 0, GL.RGBA, GL.UNSIGNED_BYTE, image,
+    );
+    const ops = decode(s.take()[0]);
+    expect(ops[0].cmd).toBe(WebglCmd.TexStorage2D);
+    expect(ops[1].cmd).toBe(WebglCmd.PixelStorei);
+    expect(ops[2].cmd).toBe(WebglCmd.TexSubImage2DSource);
+    expect(ops[2].args).toEqual([
+      GL.TEXTURE_2D, 0, 0, 0, GL.RGBA, GL.UNSIGNED_BYTE,
+      TexSource.ImageHandle, image.handle, 1,
+    ]);
+  });
+
+  it('getShaderPrecisionFormat answers highp, not flutter_angle zeros', () => {
+    const s = makeSurface();
+    const gl = new FjsWebGLRenderingContext(s as never, 7);
+    const float = gl.getShaderPrecisionFormat(
+      GL.FRAGMENT_SHADER, GL.HIGH_FLOAT,
+    );
+    expect(float).toEqual({ rangeMin: 127, rangeMax: 127, precision: 23 });
+    const int = gl.getShaderPrecisionFormat(
+      GL.VERTEX_SHADER, GL.HIGH_INT,
+    );
+    expect(int!.precision).toBe(0);
+    expect(int!.rangeMin).toBeGreaterThan(16);
+  });
+
+  it('answers the string pnames three.js version-sniffs without the host', () => {
+    // flutter_angle's getParameter throws on these keys; WebGLState calls
+    // .indexOf on VERSION during renderer init (spec 023 iOS crash)
+    const s = makeSurface();
+    const gl = new FjsWebGLRenderingContext(s as never, 7);
+    expect(gl.getParameter(GL.VERSION)).toContain('WebGL 2.0');
+    expect(gl.getParameter(GL.SHADING_LANGUAGE_VERSION)).toContain('GLSL ES 3.00');
+    expect(gl.getParameter(GL.IMPLEMENTATION_COLOR_READ_TYPE)).toBe(
+      GL.UNSIGNED_BYTE,
+    );
+    expect(gl.getParameter(GL.IMPLEMENTATION_COLOR_READ_FORMAT)).toBe(GL.RGBA);
+    expect(s.take()).toHaveLength(0); // answered locally, nothing crossed the ABI
+    // array pnames too: flutter_angle's GetIntegerv returns only the first
+    // component, so WebGLState's Vector4.fromArray would get garbage or null
+    const box = gl.getParameter(GL.SCISSOR_BOX);
+    expect(box).toEqual([0, 0, 0, 0]);
+    const viewport = gl.getParameter(GL.VIEWPORT) as number[];
+    expect(viewport).toHaveLength(4);
+    expect(viewport[2]).toBe(600); // canvas bitmap width (300 logical x dpr 2)
+    expect(viewport[3]).toBe(400);
+    expect(s.take()).toHaveLength(0);
+  });
+
+  it('texImage3D carries depth and border, inlining the payload', () => {
+    // three's WebGLState seeds empty TEXTURE_3D / TEXTURE_2D_ARRAY textures
+    // at renderer init — without this command those calls are not-a-function
+    const s = makeSurface();
+    const gl = new FjsWebGLRenderingContext(s as never, 7);
+    gl.texImage3D(
+      GL.TEXTURE_3D, 0, GL.RGBA, 1, 1, 1, 0,
+      GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array([9, 8, 7, 6]),
+    );
+    const ops = decode(s.take()[0]);
+    expect(ops[0].cmd).toBe(WebglCmd.TexImage3D);
+    expect(ops[0].args).toEqual([
+      GL.TEXTURE_3D, 0, GL.RGBA, 1, 1, 1, 0, GL.RGBA, GL.UNSIGNED_BYTE, 4,
+    ]);
   });
 
   it('uniform array truncation never sends a ragged tail', () => {
